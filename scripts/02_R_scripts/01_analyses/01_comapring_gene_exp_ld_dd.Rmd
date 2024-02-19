@@ -1,0 +1,1706 @@
+---
+title: "Comparison of LD and DD transcriptome"
+author: Biplabendu Das
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: united
+    keep_md: no
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = F)
+knitr::opts_chunk$set(message = F)
+
+## For more inspiration on customizing the html output, refer to the following:
+# https://bookdown.org/yihui/rmarkdown/html-document.html#table-of-contents
+
+set.seed(420)
+rm(list = ls())
+
+```
+
+
+```{r housekeeping, include=FALSE}
+## Load the libraries
+pacman::p_load(pheatmap, dendextend, tidyverse, viridis)
+pacman::p_load(RSQLite, tidyverse, dbplyr, DT, conflicted)
+pacman::p_load(patchwork)
+pacman::p_load(circular)
+pacman::p_load(writexl)
+library(timecourseRnaseq)
+
+## set conflict preference
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflict_prefer("layout", "plotly")
+conflict_prefer("hclust", "flashClust")
+conflict_prefer("union", "dplyr")
+conflict_prefer("sd", "stats")
+
+## set path to your working directory
+path_to_repo = "~/Documents/05_postdoc/Deborah_Gordon/04_research/2022/04_timecourse_RNASeq"
+
+## set path to the figures
+path_to_figures = paste0(path_to_repo, "/results/figures/01_LD_v_DD/")
+
+## load functions
+# customized theme for publication quality figures
+source(paste0(path_to_repo,"/functions/theme_publication.R"))
+# customized functions for plotting 
+source(paste0(path_to_repo, "/functions/plot_zscores.R"))
+# function to clean and standardize text
+source(paste0(path_to_repo, "/functions/clean_text.R"))
+
+# function to perform enrichment analysis
+source(paste0(path_to_repo,"/functions/check_enrichment2.R"))
+
+## Fisher's exact test
+fishers_overlap <- function(set.1, set.2, bg.genes=13808, alternative="greater") {
+  set.1 <- as.character(set.1) # expressed in control heads
+  set.2 <- as.character(set.2) # expressed in ophio-inf or beau-inf heads
+  
+  tot.genes <- as.numeric(bg.genes) # all genes in the Cflo genome
+  
+  # To create the contingency table for module-7 (set-1) and for.rhy (set-2), we will need the following information:
+  # genes that are in both sets
+  overlapping.genes <- intersect(set.1, set.2) %>% length()
+  # genes in set-1 but not in set-2
+  set.1.not.set.2 <- setdiff(set.1, set.2) %>% length()
+  # genes in set-2 but not in set-1
+  set.2.not.set.1 <- setdiff(set.2, set.1) %>% length()
+  # background genes not in set-1 or set-2
+  not.set.1.set.2 <- tot.genes - (union(set.1, set.2) %>% unique() %>% length())
+  
+  # Contingency table for set.1 and set.2
+  test.table <- 
+    data.frame(
+      in.set.2 = c(overlapping.genes, set.2.not.set.1),
+      not.set.2 = c(set.1.not.set.2, not.set.1.set.2)
+    )
+  rownames(test.table) <- c("in.set.1", "not.set.1")
+  
+  writeLines(paste0("Contingency table:\n"))
+  # take a look at the contingency table
+  test.table %>% print()
+  
+  writeLines(paste0("Running fisher.test() on contingency table:\n"))
+  # fisher test
+  fisher.test(test.table, alternative = alternative) %>% print()
+}
+
+```
+
+> Loading one-to-one orthologs between P. barbatus and C. floridanus
+
+```{r load_pbar_cflo_orthologs}
+path_to_pogodata <- paste0(path_to_repo,"/data/gordon_data/")
+pogo.cflo <-
+  read.csv(paste0(path_to_pogodata, "pogo_cflo_orthologs.csv"),
+           header = T, stringsAsFactors = F, na.strings = c(""," ",".", "NA")) %>%
+  as_tibble() %>% 
+  select(cflo_gene,pogo_gene) %>% 
+  distinct()
+
+# make a function that takes pogo names and returns cflo names
+pogo_to_cflo <- function(geneset) {
+  cflo_genes <- 
+    pogo.cflo %>% 
+    filter(pogo_gene %in% geneset) %>% 
+    pull(cflo_gene) %>% 
+    unique() %>% 
+    as.character()
+  
+  return(cflo_genes)
+}
+
+# make a function that takes pogo names and returns cflo names
+cflo_to_pogo <- function(geneset) {
+  pogo_genes <- 
+    pogo.cflo %>% 
+    filter(cflo_gene %in% geneset) %>% 
+    pull(pogo_gene) %>% 
+    unique() %>% 
+    as.character()
+  
+  return(pogo_genes)
+}
+
+
+```
+
+
+```{r set_parameters}
+
+# SAMPLE NAME
+## specify sample name
+sample.name <- c("pbar_ld","pbar_dd")
+
+# eJTK OUTPUT
+## Set GammaP threshold below which genes are classified as rhythmic
+gamma.pval = 0.05
+
+## Number of genes in the Pbar genome
+nGenes = 12557
+
+## Initialize list to save genes of interest in
+goi.list <- list()
+
+
+```
+
+
+```{r load_data}
+
+# LOAD DATABASES (TC9)
+## 1. TC9_ejtk.db
+# writeLines("Loading 'TC9_ejtk' database that contains all ejtk-output for TC9")
+ejtk.db <- dbConnect(RSQLite::SQLite(),
+                   paste0(path_to_repo, "/data/databases/TC9_ejtk.db"))
+# which tables are in the database
+src_dbi(ejtk.db)
+
+## 2. TC9_data.db
+# writeLines("Loading 'TC9_data' database that contains all expression data for TC9")
+data.db <- dbConnect(RSQLite::SQLite(),
+                     paste0(path_to_repo, "/data/databases/TC9_data.db"))
+src_dbi(data.db)
+
+```
+
+```{r load_fpkm_data}
+dat.fpkm <- list(
+  ld = tbl(data.db, paste0(sample.name[1],"_fpkm")) %>% collect(),
+  dd = tbl(data.db, paste0(sample.name[2],"_fpkm")) %>% collect()
+)
+```
+
+
+# Overview/Goals
+
+Using time-course RNASeq data from LD forager heads: 
+
+- identify the list of "expressed" genes (≥ 1 FPKM for at least one time point), 
+- identify list of rhythmic genes (24h, 12h, and 08h)
+- characterize their daily expression patterns
+- find biological processes enriched in these rhythmic genesets
+
+
+
+# Part 1: General patterns of gene expression
+
+### 1.1 Non-expressed genes
+
+- Genes that have NO expression in ant heads (FPKM = 0 at all time points)
+
+```{r non_expressed, fig.width=5, fig.height=5}
+
+not.expressed <- list()
+
+for (i in 1:length(sample.name)) {
+  
+  # which genes have zero expression at all time points
+  not.expressed[[i]] <-
+    tbl(data.db, paste0(sample.name[i],"_fpkm")) %>% 
+    collect() %>% 
+    filter_at(vars(starts_with("Z")), all_vars(. == 0)) %>%
+    pull(gene_name)
+  
+  writeLines(paste0("How many genes have zero expression in ", sample.name[i]," at all time points?"))
+  length(not.expressed[[i]]) %>% print()
+}
+
+### Check to see if the analyses worked. All values should be zero
+for (i in 1:length(sample.name)) {
+  writeLines(paste0("Not-expressed genes in ", sample.name[i], "; first two rows"))
+  dat.fpkm[[i]] %>% 
+  filter(gene_name %in% not.expressed[[i]]) %>% 
+  head(2) %>% print()
+
+  writeLines(paste0("Not-expressed genes in ", sample.name[i], "; last two rows\n"))  
+  dat.fpkm[[i]] %>% 
+  filter(gene_name %in% not.expressed[[i]]) %>% 
+  tail(2) %>% print()
+}
+
+### Gene set of interest 1 ###
+gsoi.1 <- list()
+# names(gsoi.1) <- "not_expressed_genes"
+
+## loop STARTS
+for (i in 1:length(sample.name)) {
+  writeLines(paste("running functional enrichment analyses for NOT-EXPRESSED genes in", sample.name[[i]]))
+  
+  genes <- not.expressed[[i]]
+  
+  # run enrichment
+  genes %>% 
+    check_enrichment2(.,
+                      org = "pbar",
+                      what = "pfams",
+                      bg = 'all',
+                      expand = T) %>% 
+    
+    # save the results to a file
+    arrange(annot_desc) ->  gsoi.1[[i]]
+  
+  # MAKE THE SUPP FILE
+  foo <-
+    pbar_annots %>% 
+    filter(gene_name %in% genes) %>% 
+    left_join(gsoi.1[[i]][,c(1,3)], by="gene_name") %>% 
+    select(gene_name, gene_desc, enriched_annot=annot_desc, everything()) %>%
+    arrange(enriched_annot) %>%
+    distinct()
+  gsoi.1[[i]] <- foo
+  
+    
+    # print()
+  
+}
+## loop ENDS
+
+## Save results of not_expressed genes into an excel file
+# supp <- list(
+#   "not_expressed_pbar_ld" = gsoi.1[[1]],
+#   "not_expressed_pbar_dd" = gsoi.1[[2]])
+# writexl::write_xlsx(supp,
+#                     path = paste0(path_to_repo,
+#                                   "/results/00_supplementary_files/01_gsoi_not_expressed_LD_v_DD.xlsx"))
+
+```
+
+
+### 1.2 Expressed genes
+
+- Genes that are expressed in ant heads (≥ 1 FPKM for at least one time point)
+
+```{r expressed}
+expressed <- list()
+
+for (i in 1:length(sample.name)) {
+  
+  # which genes are expressed in ant heads?
+  expressed[[i]] <- 
+    tbl(data.db, paste0(sample.name[i],"_expressed_genes")) %>% 
+    filter(expressed=="yes") %>% 
+    collect() %>% 
+    pull(gene_name)
+  
+  writeLines(paste0("How many genes are expressed in ", sample.name[i] ," heads?"))
+  length(expressed[[i]]) %>% print()
+  
+}
+
+```
+
+Check to see if these expressed genes are the same for LD and DD foragers
+
+```{r expressed_overlap_v1}
+fishers_overlap(set.1 = expressed[[1]],
+                set.2 = expressed[[2]],
+                bg=nGenes) # background = all genes in pbar genome
+```
+
+
+Which genes/processes are expressed during both LD and DD?
+
+```{r expressed_overlap_v2, fig.width=5, fig.height=7}
+    
+  # example of list input (list of named vectors)
+  listInput <- expressed
+                    
+  names(listInput) <- sample.name
+  
+  library(UpSetR)
+  library(viridis)
+  # caste.col <- c("#F23030","#1A80D9")
+  upset.plot <- 
+    upset(fromList(listInput),
+        number.angles = 0, point.size = 3, line.size = 1.5, 
+        mainbar.y.label = "Number of overlapping genes", 
+        sets.x.label = "Expressed genes", 
+        text.scale = c(1.5, # y-axis label ("# overlapping genes")
+                       2, # y-axis tick labels ("1000, 2000,..")
+                       1.5, # label for histogram ("sig. rhy genes")
+                       1, # tick labels for histogram
+                       1.5, # set names ("Cflo-brain_08h,..") 
+                       1.5),
+        sets = names(listInput),
+        keep.order = T,
+        sets.bar.color = viridis(1),
+        # adding queries
+        query.legend = "bottom")
+    
+    # plot it
+    print(upset.plot)
+    #
+    # dev.off()
+    
+
+writeLines("Which genes are expressed in LD but have no expression in DD?")
+repressed.in.dd <- 
+  intersect(expressed[[1]],
+        not.expressed[[2]]) %>% unique()
+
+pbar_annots %>% 
+  filter(gene_name %in% repressed.in.dd) %>% 
+  left_join(dat.fpkm[[1]], by="gene_name") %>% 
+  left_join(dat.fpkm[[2]], by="gene_name") %>% 
+  DT::datatable()
+
+repressed.in.dd %>% 
+  # exp.plot(log=T) %>% 
+  stacked.zplot(text_size = 35) %>%
+  multi.plot(rows = 2, cols=1)
+
+writeLines("Let's look at the temporal expression of genes that are expressed during LD but not DD")
+setdiff(expressed[[1]],
+        expressed[[2]]) %>% 
+  stacked.zplot(text_size = 35) %>% 
+  multi.plot(rows = 2, cols=1)
+
+writeLines("What are the functions of these genes?")
+setdiff(expressed[[1]],expressed[[2]]) %>% 
+  check_enrichment2(org = "pbar",
+                   what = "pfams",
+                   bg = "all",
+                   expand = T,
+                   verbose = T) %>%
+  arrange(annot_desc, gene_name) %>% 
+  DT::datatable()
+
+writeLines("Odorant receptor coreceptor: LOC105424270")
+"LOC105424270" %>% 
+  exp.plot(log=F)
+
+dat.fpkm[[1]]
+    
+writeLines("Let's take a look at the expression and function of genes that are expressed during constant dark but not LD")
+setdiff(expressed[[2]],expressed[[1]]) %>%
+  stacked.zplot(bg.alpha = .2) %>%
+  multi.plot(rows = 2, cols=1)
+
+setdiff(expressed[[2]],expressed[[1]]) %>%
+   check_enrichment2(org = "pbar",
+                   what = "pfams",
+                   bg = "all",
+                   expand = T,
+                   verbose = T)
+```
+
+
+
+Summary of the results:
+
+> General patterns of gene expression in Pbar forager brains in LD and DD
+
+- 10906 genes were expressed (FPKM ≥ 1 for at least one time point) in Pbar forager brains when sampled under 12:12 LD cycle
+- Similarly, 10537 genes were expressed in Pbar forager brains during constant darkness.
+- 10446 of Pbar genes were expressed in both conditions, 460 genes were uniquely expressed only during LD, and 91 uniquely expressed in constant darkness.
+- Therefore, the same genes were expressed in both LD and DD conditions (Fisher's exact test; odds-ratio = 389, p-val < 2.2e-16)
+
+> Differences in LD and DD
+
+- 460 genes that were expressed only in LD, but not in DD, show a synchronized peak around ZT 3 (three hours after lights were turned on), which is lost during constant darkness.
+- Intriguingly, these 460 genes were primarily involved in olfaction and odorant binding, and included a copy of the odorant receptor co-receptor (LOC105424270) which is an essential component of olfactory pathways in ants (refer to orco work from Rockfeller/Kronaeur lab).
+    - Check if this is the only copy of orco in Pbar, or if there are multiple ones.
+    - Note, the orco shows up only when we run GO enrichments, but not for pfams.
+
+- Odorant receptor genes were also overrepresented in the set of genes with no expression in the brains of pbar foragers collected in LD (~5% of 273 genes). However, the number of odorant binding genes that do not show any expression is relatively higher in constant darkness (~20% of 273 genes).
+
+- Taken together, it seems that odorant receptor genes [sensory perception of smell, odorant binding, olfactory receptor activity] that usually are expressed in forager brains under LD cycle show either a loss of expression (FPKM = 0) or a reduced expresssion (0 < FPKM < 1) under constant dark conditions. 
+  
+
+___
+
+
+# Part 2: Diurnal rhythms in gene expression
+
+### 2.1 Load rhythmic genesets
+
+```{r rhythmic_genes}
+
+rhy.24 <- list()
+rhy.12 <- list()
+rhy.08 <- list()
+
+rhy.genes <- list()
+
+for (i in 1:length(sample.name)) {
+
+  ## Load all the rhythmic genesets 
+  ## Note, ordered according to their p-value; highly rhythmic at the top.
+  
+  # Circadian genes (period = 24h)
+  ## get the gene-names for sig. 24h-rhythmic genes
+  rhy.24[[i]] <-
+    tbl(ejtk.db, paste0(sample.name[i],"_zscores_24h")) %>% 
+    filter(GammaP < gamma.pval) %>% 
+    select(ID, GammaP) %>% collect() %>% arrange(GammaP) %>%
+    select(ID) %>% pull()
+  
+  # Ultradian genes (period = 12h)
+  ## get the gene-names for sig. 12h-rhythmic genes
+  rhy.12[[i]] <-
+    tbl(ejtk.db, paste0(sample.name[i],"_zscores_12h")) %>%
+    filter(GammaP < gamma.pval) %>%
+    select(ID, GammaP) %>% collect() %>% arrange(GammaP) %>%
+    select(ID) %>% pull()
+  
+  # Ultradian genes (period = 08h)
+  ## get the gene-names for sig. 08h-rhythmic genes
+  rhy.08[[i]] <-
+    tbl(ejtk.db, paste0(sample.name[i],"_zscores_08h")) %>%
+    filter(GammaP < gamma.pval) %>%
+    select(ID, GammaP) %>% collect() %>% arrange(GammaP) %>%
+    select(ID) %>% pull()
+  
+  writeLines(paste0("How many sig. rhythmic genes are there in ", 
+                    sample.name[i],"  brains? (GammaP < ",gamma.pval, ")"))
+  rhy.genes[[i]] <- list(rhy.24[[i]],rhy.12[[i]],rhy.08[[i]])
+  names(rhy.genes[[i]]) <- paste0(sample.name[i], c("_24h", "_12h", "_08h"))
+  names(rhy.genes)[i] <- sample.name[[i]]
+  print(sapply(rhy.genes[[i]],length))
+  
+}
+
+
+## load zscore dataset
+zscore.dat <- list()
+for (i in 1:length(sample.name)){
+  zscore.dat[[i]] <- data.db %>% tbl(., paste0(sample.name[i],"_zscores")) %>% collect()
+}
+
+
+```
+
+### Save genes of interest: Rhy genes
+
+```{r goi_1}
+goi.list[[1]] <- rhy.genes
+names(goi.list) <- "rhy_genes"
+```
+
+
+# Part 3: Compare overlap between rhythmic genes (LD vs. DD)
+
+- Compare the rhythmic (24h, 12h, 08h) rhythmic genesets that were identified in control forager heads to the ones detected in the heads of ophio-inf and beau-inf foragers.
+- Visualize the overlaps using an **Upset plot**
+- Check for sig. overlaps between the genesets using **GeneOverlap**
+
+### 3.1 Load rhythmic genesets
+
+> Already loaded; variable names: rhy.24h, rhy.12h, rhy.08h
+
+Let's load rhythmic genes for forager brains (from TC5)
+
+```{r rhythmic_genes_TC5}
+
+# specify path to TC5 data
+path_to_repo_TC5 = "~/Documents/GitHub/Das_et_al_2021"
+# load the TC5 database
+tc5.db <- dbConnect(RSQLite::SQLite(), 
+                    paste0(path_to_repo_TC5, "/data/TC5_data.db"))
+
+## Get the zscore data for forager brains
+zscore.brains <- tc5.db %>% tbl(., "zscore_for") %>% collect()
+
+## save the rhythmic genes identified in forager brains 
+# 24h
+for24.TC5 <-
+  tbl(tc5.db, "ejtk_all") %>% 
+  filter(caste == "for" & rhy == "yes") %>% 
+  select(gene_name, GammaP) %>% collect() %>% arrange(GammaP) %>%
+  select(gene_name) %>% pull()
+
+# 12h
+for12.TC5 <- 
+  tbl(tc5.db, "ejtk_12h_all") %>% 
+  filter(caste == "for" & rhy == "yes") %>% 
+  select(gene_name, GammaP) %>% collect() %>% arrange(GammaP) %>% 
+  select(gene_name) %>% pull()
+
+# 08h
+for08.TC5 <- 
+  tbl(tc5.db, "ejtk_8h_all") %>% 
+  filter(caste == "for" & rhy == "yes") %>% 
+  select(gene_name, GammaP) %>% collect() %>% arrange(GammaP) %>% 
+  select(gene_name) %>% pull()
+
+writeLines("How many genes were identified as sig. rhythmic in forager brains? (TC5)")
+rhy.genes.tc5 <- list(for24.TC5, for12.TC5, for08.TC5)
+names(rhy.genes.tc5) <- paste0("Cflo-brain", c("_24h", "_12h", "_08h"))
+sapply(rhy.genes.tc5,length)
+```
+
+
+### 3.2 Visualize overlaps (LD v. DD)
+
+```{r rhy_genes_brain_v_head_v1}
+
+sapply(rhy.genes[[1]], length)
+# example of list input (list of named vectors)
+
+listInput <- list(rhy.24[[1]],rhy.12[[1]],rhy.08[[1]],
+                  rhy.24[[2]],rhy.12[[2]],rhy.08[[2]])
+names(listInput) <- c(paste0("Pbar-LD", c("_24h","_12h","_08h")),
+                      paste0("Pbar-DD", c("_24h","_12h","_08h")))
+```
+
+> Circadian + Ultradian rhythms
+
+```{r, fig.height=6, fig.width=7}
+library(UpSetR)
+library(viridis)
+# caste.col <- c("#F23030","#1A80D9")
+upset(fromList(listInput),
+      number.angles = 0, point.size = 3, line.size = 1.5,
+      mainbar.y.label = "Number of overlapping genes",
+      sets.x.label = "Sig. rhy genes",
+      text.scale = c(1.5, # y-axis label ("# overlapping genes")
+                     2, # y-axis tick labels ("1000, 2000,..")
+                     1.5, # label for histogram ("sig. rhy genes")
+                     1, # tick labels for histogram
+                     1.5, # set names ("Cflo-brain_08h,..")
+                     1.5),
+      sets = names(listInput),
+      nintersects = 15,
+      keep.order = T,
+      sets.bar.color = viridis(1),
+      # adding queries
+      query.legend = "bottom"
+      )
+```
+
+
+> Circadian only
+
+```{r, fig.height=4, fig.width=4}
+listInput2 <- list(rhy.24[[1]], rhy.24[[2]])
+names(listInput2) <- c(paste0("Pbar-LD", c("_24h")), paste0("Pbar-DD", c("_24h")))
+upset(fromList(listInput2),
+      number.angles = 0, point.size = 3, line.size = 1.5,
+      mainbar.y.label = "Number of overlapping genes",
+      sets.x.label = "Sig. rhy genes",
+      text.scale = c(1.5, # y-axis label ("# overlapping genes")
+                     2, # y-axis tick labels ("1000, 2000,..")
+                     1.5, # label for histogram ("sig. rhy genes")
+                     1, # tick labels for histogram
+                     1.5, # set names ("Cflo-brain_08h,..")
+                     1.5),
+      sets = names(listInput2),
+      nintersects = 15,
+      keep.order = T,
+      sets.bar.color = viridis(1),
+      # adding queries
+      query.legend = "bottom"
+      )
+```
+
+
+### 24h-rhythmic in LD and DD
+
+```{r, fig.height=6, fig.width=7}
+## Let's plot the heatmaps to tease apart the patterns
+goi <- intersect(rhy.24[[1]], rhy.24[[2]])
+# make a list to save the cluster information
+my_gene_col <- list()
+
+# Filter the zscores to keep only the genes of interest
+zscore.dummy <-
+  zscore.dat[[1]] %>% 
+  
+  # Keep only sig. 24h-rhythmic genes in control Cflo heads
+  filter(gene_name %in% goi) %>% 
+  
+  ## Concat. data from ophio- and beau-infected Cflo heads
+  left_join(zscore.dat[[2]], by="gene_name") %>%
+  as.data.frame()
+  
+# Set genes as rownames and convert it into a matrix
+rownames(zscore.dummy) = zscore.dummy$gene_name
+zscore.dummy <- as.matrix(zscore.dummy[-1])
+  
+  
+# Hierarchical clustering the geneset
+my_hclust_gene <- hclust(dist(zscore.dummy), method = "complete")
+# my_hclust_gene <- hclust(dist(zscore.rhy), method = "complete")
+  
+# Make annotations for the heatmaps
+n_clusters <- 4
+my_gene_col <- cutree(tree = as.dendrogram(my_hclust_gene), k = n_clusters) # four clusters
+my_gene_col <- data.frame(cluster = my_gene_col)
+  
+  
+# I’ll add some column annotations and create the heatmap.
+  # Annotations for:
+  # 1. Is the sample collected during the light or dark phase? 
+my_sample_col <- 
+  data.frame(phase = rep(rep(c("light", "dark"), c(6,6)),2),
+             conds = rep(c("pbar_ld","pbar_dd"), each=12))
+row.names(my_sample_col) <- colnames(zscore.dummy)
+  
+# Manual color palette
+my_colour = list(
+  phase = c(light = "#F2E18D", dark = "#010440"),
+  conds = c(pbar_ld = "#AD212F", pbar_dd = "#5A829F"),
+  cluster = viridis::cividis(100)[c(seq(10,90,by=round(80/(n_clusters), 0)))])
+  
+# Color scale
+my.breaks = seq(min(na.omit(zscore.dummy)), 
+                max(na.omit(zscore.dummy)), by=0.06)
+# my.breaks = seq(min(zscore.rhy), max(zscore.rhy), by=0.06)
+
+# colnames(zscore.dummy) <- c(rep(c("","",6,"","",12,
+#                                   "","",18,"","",24),2))
+  
+# Let's plot!
+pheatmap(zscore.dummy, show_rownames = F, 
+                           show_colnames = F,
+                           # angle_col = c("0"),
+                           annotation_row = my_gene_col, 
+                           annotation_col = my_sample_col,
+                           # cutree_rows = 4,
+                           gaps_row = c(12),
+                           # cutree_cols = 3,
+                           gaps_col = c(12,24),
+                           annotation_colors = my_colour,
+                           border_color=FALSE,
+                           cluster_rows = T,
+                           cluster_cols = F,
+                           breaks = my.breaks,
+                           ## color scheme borrowed from: 
+                           color = inferno(length(my.breaks) - 1),
+                           treeheight_row = 0,
+                           # treeheight_col = 0,
+                           # remove the color scale or not
+                           main = paste0("24h-rhythmic in \nLD and DD", 
+                                         "\n n(genes) = ", 
+                                         length(rownames(zscore.dummy))),
+                           ## annotation legend
+                           annotation_legend = T,
+                           ## Color scale
+                           legend = T)
+```
+
+
+> Let's look at the expression of genes in Cluster 1 and 2 from the above heatmap
+
+```{r rhy_genes_LD_DD_v2, fig.height=4, fig.width=4}
+## Let's look Cluster 1
+for (i in 1:2){
+  writeLines(paste0("Plotting for cluster: ", i))
+  my_gene_col %>%
+    rownames_to_column("g") %>%
+    filter(cluster==i) %>%
+    pull(g) %>%
+    stacked.zplot() %>%
+    multi.plot(rows=2,cols=1) %>%
+    print()
+
+  writeLines(paste0("Plotting amplitudes.."))
+  my_gene_col %>%
+    rownames_to_column("g") %>%
+    filter(cluster==i) %>%
+    pull(g) %>%
+    amplitude.plot(stats = T) %>%
+    print()
+}
+```
+
+### What are the functions of genes cycling in LD and DD?
+
+```{r rhy_genes_LD_DD_v3, fig.height=8, fig.width=6}
+rhy.24[[1]] |> length()
+
+rhy.24[[2]] |> length()
+
+intersect(rhy.24[[1]], rhy.24[[2]]) |> 
+   check_enrichment2(org = "pbar",
+                   what = "pfams",
+                   bg = "all",
+                   expand = T,
+                   verbose = T)
+
+pbar_annots |> 
+  filter(
+    gene_name %in% intersect(rhy.24[[1]], rhy.24[[2]])
+  ) |> 
+  distinct() |> 
+  DT::datatable()
+```
+
+
+
+### 3.3 Check for significant overlaps
+
+> Rhy genes: Pbar-LD vs. Pbar-DD
+
+```{r rhy_genes_overlap, fig.width=7, fig.height=5}
+## MAKE YOUR LIST OF GENES OF INTEREST ##
+
+# LIST ONE - control rhy genes
+list1 <- rhy.genes[[1]]
+names(list1) <- paste0("Pbar_LD", c("_24h","_12h","_08h"))
+
+
+## LIST TWO - ophio rhythmic genes
+list2 <- rhy.genes[[2]]
+names(list2) <- paste0("Pbar_DD", c("_24h","_12h","_08h"))
+
+
+# ## LIST FOUR - forager brains rhy genes
+# list4 <- rhy.genes.tc5
+# names(list4) <- paste0("Cflo-brain", c("_24h","_12h","_08h"))
+
+
+## CHECK FOR OVERLAP
+library(GeneOverlap)
+
+# how many genes are expressed in Pogo forager brains
+nGenesExp = expressed %>% unlist() %>% unique() %>% length()
+
+## make a GOM object
+gom.1v2 <- newGOM(list1, list2, genome.size = nGenesExp)
+
+
+writeLines("Visualizing the significant overlaps between your lists of interesting genes and the identified modules")
+drawHeatmap(gom.1v2,
+              adj.p=T,
+              cutoff=0.05,
+              what="odds.ratio",
+              # what="Jaccard",
+              log.scale = T,
+              note.col = "grey80")
+
+```
+
+> Rhy genes: Pbar-LD vs. Cflo-LD
+
+- number of rhythmic genes identified in Cflo forager brains in LD: 3569 (24h), 148 (12h), 229 (8h)
+- number of Cflo rhy genes that have an ortholog in Pbar: 3265 (24h), 126 (12h), 174 (8h)
+
+```{r rhy_genes_overlap_pbar_cflo, fig.width=7, fig.height=5}
+## MAKE YOUR LIST OF GENES OF INTEREST ##
+
+# LIST ONE - control rhy genes
+list1 <- rhy.genes[[1]]
+names(list1) <- paste0("Pbar_LD", c("_24h","_12h","_08h"))
+
+
+## LIST TWO - ophio rhythmic genes
+list2.cflo <- sapply(rhy.genes.tc5, cflo_to_pogo)
+names(list2.cflo) <- paste0("Cflo_LD", c("_24h","_12h","_08h"))
+
+
+## CHECK FOR OVERLAP
+library(GeneOverlap)
+
+# how many genes are expressed in Pogo forager brains
+nGenesExp = expressed %>% unlist() %>% unique() %>% length()
+
+## make a GOM object
+gom.1v2.cflo <- newGOM(list1, list2.cflo, genome.size = nGenesExp)
+
+writeLines("Visualizing the significant overlaps between your lists of interesting genes and the identified modules")
+drawHeatmap(gom.1v2.cflo,
+              adj.p=T,
+              cutoff=0.05,
+              what="odds.ratio",
+              # what="Jaccard",
+              log.scale = T,
+              note.col = "grey80")
+
+```
+
+
+### 3.4 Phase plots
+
+Get a summary for the rhythmic properties of each geneset
+
+```{r rhythmic_props, fig.width=6, fig.height=6}
+
+my.colors <- c(pbar_ld = "#AD212F", pbar_dd = "#5A829F")
+
+rhy.24.sig <- list()
+phase.ejtk <- list()
+
+# Obtain the phases of 24h-rhythmic genes in controls v. ophio-inf v. beau-inf ants
+for (i in 1:length(sample.name)) {
+  rhy.24.sig[[i]] <- 
+    tbl(ejtk.db, paste0(sample.name[i],"_zscores_24h")) %>% 
+    filter(GammaP < gamma.pval) %>% 
+    collect()
+  
+  # Get the phases of the best matched waveforms
+  phase.ejtk[[i]] <- circular::circular(rhy.24.sig[[i]]$Phase, 
+                                        units="hours", template="clock24")
+  
+  }
+
+
+# Circular stats - tests --------------------------------------------------
+
+# save all the circular phases in a list
+l.phases <- phase.ejtk
+# let's name the list elements for later use and reference
+names(l.phases) <- names(my.colors)
+
+# Watson Test -------------------------------------------------------------
+
+# A Watson Test determines if two groups’ orientations are significantly different from each other. 
+# Here, it will allow us to test whether the mean phase predicted by eJTK and RAIN
+# are significiantly different or not.
+
+# ?watson.two.test #help file on this statistical test
+
+writeLines("Performing Watson test to check if the average peak of 24h-rhythms has significantly shifted during constant dark conditions")
+
+# For all rhy genes
+ld.dd <- watson.two.test(l.phases[[1]],l.phases[[2]], alpha = 0.001)
+ld.dd %>% print()
+
+# Initialize a list for saving the ggplots
+g <- list()
+
+means <- as.numeric(lapply(phase.ejtk, mean))
+means <- circular(means, units="hours", template="clock24")
+
+
+for(i in 1:length(l.phases)) {
+  
+  # define phase levels
+  ordered_phases <- c("2","4","6","8","10","12",
+                      "14","16","18","20","22","24")
+    
+  df.test <- l.phases[[i]] %>%
+    as.data.frame() %>% 
+    mutate(phase = x) %>%
+    mutate(phase = replace(phase, x=="0", "24")) %>% 
+    select(-x) %>% 
+    group_by(phase = factor(phase, levels = ordered_phases)) %>%
+    summarise(n_genes = n())
+
+  m <- as.numeric(means[i])
+    
+  g[[i]] <-
+    ggplot(df.test, aes(x=factor(phase), y=n_genes)) + 
+    # indicate light-dark phase
+    geom_rect(aes(xmin = as.factor(12), xmax = as.factor(24), 
+                  ymin = -Inf, ymax = Inf),
+              fill = "grey80", alpha = 0.05, color=NA) +
+    geom_bar(stat='identity', fill=my.colors[[i]]) +
+    
+    xlab(c(names(my.colors)[i])) +
+    
+    scale_y_continuous(breaks = c(0,200,400), limits = c(0,450)) +
+    
+    coord_polar() +
+    theme_bw() +
+    theme(text = element_text(size = 15, colour = 'black'),
+              axis.title.y=element_blank(),
+              # axis.text.x=element_blank(),
+              legend.position = "none")
+    #ggtitle(paste0("Dataset: ", names(l.phases)[i])) 
+  
+  print(m)
+}
+
+ggpubr::ggarrange(plotlist=g,
+                  nrow = 1, ncol = 2,
+                  widths = c(1,1), labels = NA)
+
+
+
+```
+
+Results:
+
+
+
+
+
+### 3.5 Hierarchical clustering and plotting heatmaps
+
+> This step is not required here. Most likely, we can use the following step to identify smaller clusters within a module of interest (see scripts 02 and 03)
+
+- perform hierarchical clustering of the rhythmic genes,
+- plot time-course heatmaps for the clustered rhythmic geneset,
+- identify the day-peaking and night-peaking clusters visually.
+
+```{r heatmaps, fig.width=4, fig.height=6}
+
+# make a list to save the cluster information
+my_gene_col <- list()
+
+# Filter the zscores to keep only rhythmic genes
+for (i in 1:length(rhy.24)){
+  
+  writeLines(paste0("Clustering and plotting heatmaps for ", sample.name[[i]]))
+  
+  # filter the zscores for the rhythmic geneset
+  zscore.rhy <-
+    
+    zscore.dat[[i]] %>% 
+    
+    # Keep only sig. 24h-rhythmic genes in control Cflo heads
+    filter(gene_name %in% rhy.24[[i]]) %>% 
+    
+    ## Concat. data from ophio- and beau-infected Cflo heads
+    # left_join(zscore.dat[[2]], by="gene_name") %>%
+    
+      
+    as.data.frame()
+  
+  # Set genes as rownames and convert it into a matrix
+  rownames(zscore.rhy) = zscore.rhy$gene_name
+  zscore.rhy <- as.matrix(zscore.rhy[-1])
+  
+  
+  # Hierarchical clustering the geneset
+  my_hclust_gene <- hclust(dist(zscore.rhy), method = "complete")
+  
+  # Make annotations for the heatmaps
+  my_gene_col[[i]] <- cutree(tree = as.dendrogram(my_hclust_gene), k = 4) # four clusters
+  my_gene_col[[i]] <- data.frame(cluster = my_gene_col[[i]])
+  
+  
+  # I’ll add some column annotations and create the heatmap.
+    # Annotations for:
+    # 1. Is the sample collected during the light or dark phase? 
+  my_sample_col <- 
+    data.frame(phase = rep(rep(c("light", "dark"), c(6,6)),1),
+               conds = rep(sample.name[i], each=12))
+  row.names(my_sample_col) <- colnames(zscore.rhy)
+  
+  # Manual color palette
+  my_colour = list(
+    phase = c(light = "#F2E18D", dark = "#010440"),
+    conds = c(my.colors[i]),
+    cluster = viridis::cividis(100)[c(seq(10,90,by=round(80/(n_clusters), 0)))])
+  
+  # Color scale
+  my.breaks = seq(min(na.omit(zscore.rhy)), max(na.omit(zscore.rhy)), by=0.06)
+  # my.breaks = seq(min(zscore.rhy), max(zscore.rhy), by=0.06)
+  
+  # Let's plot!
+  pheatmap(zscore.rhy, show_rownames = F, show_colnames = F,
+                           annotation_row = my_gene_col[[i]], 
+                           annotation_col = my_sample_col,
+                           # cutree_rows = 4,
+                           # cutree_cols = 3,
+                           # gaps_col = c(12,24),
+                           annotation_colors = my_colour,
+                           border_color=FALSE,
+                           cluster_rows = T,
+                           cluster_cols = F,
+                           breaks = my.breaks,
+                           ## color scheme borrowed from: 
+                           color = inferno(length(my.breaks) - 1),
+                           treeheight_row = 0,
+                           # treeheight_col = 0,
+                           # remove the color scale or not
+                           main = paste0(sample.name[[i]], "\n n(genes) = ", 
+                                         length(rownames(zscore.rhy))),
+                           ## annotation legend
+                           annotation_legend = T,
+                           ## Color scale
+                           legend = T
+           )
+  
+  }
+
+
+```
+
+
+----
+
+# Part 4: Explore the DRGs (differences in period)
+
+## TO DO
+
+The differentially rhythmic genes (DRGs) here refer to genes that undergo changes in their periodicity of rhythmic expression (8h, 12h, or 24h) between different conditions. For example, the ~300 genes that switches from oscillating every 24h in forager brains to every 8h in nurses.
+
+----
+
+# Part 5: Identify DEGs
+
+### Prep all data and functions
+
+```{r prep_v1}
+
+# Let's load functions for running limorhyde
+# source(system.file('extdata', 'vignette_functions.R', package = 'limorhyde'))
+# Let's load the libraries required for running Limorhyde
+# library('annotate')
+library('data.table')
+library('foreach')
+# library('GEOquery')
+library('ggplot2')
+library('knitr')
+library('limma')
+library('limorhyde')
+
+conflict_prefer("union", "dplyr")
+
+```
+
+### Format the metadata
+
+I need to create a csv file with the metadata information for the different samples collected
+
+```{r create_metadata}
+
+sample.name <- c("pbar_ld","pbar_dd")
+short.name <- c("ld","dd")
+time.points <- seq(1,23,2)
+light.dark <- c(rep("light",times=6), rep("dark",times=6))
+
+TC9.meta <- data.frame(title = paste0(rep(sample.name, each=12),"_ZT",time.points),
+                       sample = paste0(rep(time.points, times=2),rep(short.name, each=12)),
+                       genotype = rep(sample.name, each=12),
+                       time = rep(time.points, times=2),
+                       cond = rep(sample.name, each=12),
+                       LD = rep(light.dark, times=2),
+                       stringsAsFactors = F)
+
+TC9.meta %>% glimpse()
+```
+
+Now, format the metadata.
+
+```{r prep_v2}
+### 1.1.1 Format the meta-data ----------------
+# load the meta-data
+sm <- TC9.meta
+# Let's format the columns in the right data-type
+sm$time <- as.numeric(sm$time)
+# sm$batch <- as.factor(sm$batch)
+sm$LD <- as.factor(sm$LD)
+# sm$location <- as.factor(sm$location)
+
+# Let's get a glimpse of the metadata
+sm %>%
+  glimpse()
+
+# Next we use limorhyde to calculate time_cos and time_sin, which are based on the first
+#harmonic of a Fourier decomposition of the time column, and append them to the sm data frame.
+sm = cbind(sm, limorhyde(sm$time, 'time_'))
+# convert the dataframe into a data.table
+sm <- data.table(sm)
+# check that it worked
+sm[1:5, ]
+```
+
+### Format the expression data
+
+Get the FPKM data
+
+```{r}
+### 1.1.2 Format the expression data ----------------
+
+# Control - Expressed
+#
+# extract the (gene-expr X time-point) data
+pbar.ld.dat <-
+  data.db %>%
+  tbl(., paste0(sample.name[1] ,"_fpkm")) %>%
+  select(gene_name, everything()) %>%
+  collect()
+# count the number of time points that has ≥ 1 FPKM
+n.expressed <- apply(pbar.ld.dat[-1], 1, function(x) sum(x >= 1))
+# subset the data and only keep the filtered genes
+pbar.ld.dat <- pbar.ld.dat[which(n.expressed >=6),] # 9591 genes
+
+# get the data for both infected ants
+
+# initialize a list to save the datasets
+emat <- list()
+
+for (i in 2:length(sample.name)) {
+  
+# extract the (gene-expr X time-point) data
+inf.dat <-
+  data.db %>%
+  tbl(., paste0(sample.name[i] ,"_fpkm")) %>%
+  select(gene_name, everything()) %>%
+  collect()
+#
+# count the number of time points that has ≥ 1 FPKM
+n.expressed <- apply(inf.dat, 1, function(x) sum(x >= 1))
+# subset the data and only keep the filtered genes
+inf.dat <- inf.dat[which(n.expressed >=6),] 
+
+
+# Merge the two tables into one
+emat[[i-1]] <- pbar.ld.dat %>%
+  # keep only the genes that are expressed in all conditions
+  # (Note: there are 4 genes that are expressed in foragers but not in nurses)
+  filter(gene_name %in% inf.dat$gene_name) %>%
+  left_join(inf.dat, by = "gene_name") %>% 
+  as.data.frame()
+
+# # Did it work?
+# head(emat[[i-1]]) %>% print()
+}
+
+```
+
+
+```{r}
+# Create the log2 transformed input matrix for identifying DEGs ----------------------------
+
+for (i in 1:length(emat)) {
+  
+# save gene names as row names
+rownames(emat[[i]]) <- emat[[i]][,1]
+emat[[i]] <- emat[[i]][,-1]
+# summary(emat[[i]]) %>% print()
+
+# Let's remove NAs
+emat[[i]] <- na.omit(emat[[i]]) 
+
+# Need to make the emat into a matrix.
+emat[[i]] <- data.matrix(emat[[i]])
+# emat[[i]][1:5,1:5] %>% print()
+# class(emat) # is a matrix with samples=columns and genes=rows
+
+## log2 transform the data
+emat[[i]] <- log2(emat[[i]] + 1)
+
+}
+
+```
+
+### Identify DEGs
+
+```{r}
+# 1.2 Identify DEGs ----------------------------------------------
+# Identify DEGs:
+### Differential expression is based on the coefficient for cond in a linear model with no 
+### interaction terms. We pass all genes to limma, but keep results only for non-differentially 
+### rhythmic genes, and adjust for multiple testing accordingly.
+
+# Set threshold for q-value (BH adjusted p-value)
+q.threshold <- 0.05 # currently, using 5% FDR
+log2.foldchange <- 1 # thus, any gene with a 2^(log2.foldchange) fold change in it's expression
+
+# 1.2.1 all rhy genes -----------------------------------------------
+
+# initialize the list to save the results of the DEG analysis to
+all.DEGs <- list()
+
+for(i in 1:length(emat)){
+  
+# Filter the metadata according to your comparison
+sm.sub <- sm %>% filter(cond %in% c(sample.name[1],sample.name[i+1]))
+
+# Define the cond column as a factor
+# sm.control.ophio$genotype <- as.factor(sm$genotype)
+sm.sub$cond <- as.factor(sm.sub$cond)
+
+
+# Use the subsetted emat to find DEGs
+design.deg = model.matrix(~ cond + time_cos + time_sin, data = sm.sub)
+
+fit = lmFit(emat[[i]], design.deg)
+fit = eBayes(fit, trend = TRUE)
+# Take a look at the coefficients table
+fit$coefficients %>% head()
+
+deLimma.deg = data.table(topTable(fit, coef = 2, number = Inf), keep.rownames = TRUE)
+setnames(deLimma.deg, 'rn', 'gene_name')
+deLimma.deg[, adj.P.Val := p.adjust(P.Value, method = 'BH')]
+setorderv(deLimma.deg, 'adj.P.Val')
+
+# deLimma.deg %>%
+#   arrange(adj.P.Val) %>%
+#   head()
+
+
+# Save the results of the DEG analysis
+# save(deLimma.deg,
+#      file = "~/Documents/GitHub/R-scripts_zombie_ant_lab/Functions/data/DEGs/TC5_DEG_results.RData")
+##
+## Done.
+
+# # Load the results of the DEG analysis (dataframe: deLimma.deg)
+# load(file = "~/Documents/GitHub/R-scripts_zombie_ant_lab/Functions/data/DEGs/TC5_DEG_results.RData")
+
+# Annotate the results to indicate the significant genes
+all.DEGs[[i]] <- 
+  deLimma.deg %>% 
+  arrange(adj.P.Val) %>% 
+  mutate(sig = as.factor(ifelse(adj.P.Val < q.threshold & abs(logFC) >= log2.foldchange, "yes", "no"))) %>% 
+  mutate(set1_v_set2 = as.factor(ifelse(sig=="yes", ifelse( logFC > 0, "up", "down" ), "NA"))) %>% 
+  mutate(inf = sample.name[i+1])
+
+# head(all.DEGs)
+
+writeLines(paste0("Set 1: ",sample.name[i],"\nSet 2: ", sample.name[i+1], "\n--Results of DEG analysis--"))
+## How many DEGs - 5% FDR and ≥ 1 fold change in gene expression
+all.DEGs[[i]] %>% 
+  # filter(adj.P.Val < q.threshold) %>%
+  # filter(abs(logFC) >= 2) %>% # change the criteria here for top DEG or all DEG (logFC≥1)
+  filter(sig == "yes") %>% 
+  # pull(gene_name) %>% 
+  # exp.plot(log = T) %>% 
+  # pluck(1) %>% 
+  # multi.plot(rows = 5, cols = 5)
+  # the foraging gene
+  # filter(geneId == "LOC105255628") # is not sig DE
+  group_by(set1_v_set2) %>% 
+  summarise(n_genes = n()) %>% 
+  as.data.frame() %>% 
+    ## n = 81 up- and 141 down-regulated genes in Cflo heads during Ophio-infection 
+    ## (at 5% FDR; log2-fold-change ≥ 1) 
+  print()
+}
+
+# ## Save the results of the DEG analysis
+# all.DEGs %>%
+#   saveRDS(., file = paste0(path_to_repo,"/results/cflo/","cflo_inf_v_control_DEGs.Rds"))
+
+```
+
+
+### Volcano plot
+
+```{r, fig.width=5, fig.height=5}
+# Volcano plot 
+library(viridis)
+# png("~/OneDrive - University of Central Florida/BD-TC5/TC5_Paper/results_figs/volcano_for_nur_DEGs.png",
+#     width = 14, height = 10, units = "cm", res = 300)
+
+for (i in 1:length(all.DEGs)) {
+
+  
+  plot <- ggplot(all.DEGs[[i]]) +
+  # geom_hline(yintercept = -log10(0.05), col="red", alpha=0.6) +
+  # geom_vline(xintercept = c(-2,2), col="grey60", alpha=0.75) +
+  geom_point(aes(x = logFC, y = -log10(adj.P.Val), color=sig), size = 1.5, alpha = 0.5) +
+  labs(x = expression(log[2]*' fold-change (LD v DD)'), 
+       y = expression(-log[10]*' '*q[DE]),
+       # title = as.character(sample.name[i+1]),
+       color = "significant") +
+  # scale_x_continuous(limits = c(-5,3),
+  #                    breaks = c(-5,-4,-3,-2,-1,0,1,2,3),
+  #                    labels = c("-5","","-3","","-1","","1","","3")) +
+  # xlim(c(-50,50)) +
+  theme_Publication(20) +
+  scale_color_viridis(discrete = T, direction = -1, option = "viridis")
+  
+  print(plot)
+  # annotation_custom(grid::textGrob(paste0( nrow(tc5.all.DEGs[tc5.all.DEGs$sig == "yes", ]),
+  #                                          " DEGs ",
+  #                                         "(tested: ", nrow(tc5.all.DEGs),"genes)")),
+  #                   xmin = -4, xmax=2, ymin = 7, ymax = 8)
+# dev.off()
+
+  }
+
+```
+
+> Most genes did not show a substantial change in their expression levels in DD vs. LD (fold-change < 2). How does this result compare to what is known in flies, mice, and humans?
+
+> 10 genes, however, showed at least a two fold increase in Pbar brains during constant darkness. What are these genes?
+
+
+## Plot temporal patterns of DEGs
+
+```{r plot_tempo_DEGs, fig.width=8, fig.height=8}
+
+up.degs <- all.DEGs[[i]] %>% 
+  filter(sig == "yes") %>%
+  filter(set1_v_set2 == "up") %>% 
+  pull(1)
+
+down.degs <- all.DEGs[[i]] %>% 
+  filter(sig == "yes") %>%
+  filter(set1_v_set2 == "down") %>% 
+  pull(1)
+
+all.degs <- c(up.degs, down.degs)
+
+deg.plots <- list()
+for (i in 1:length(all.degs)) {
+  g <- all.degs[i]
+  deg.plots[[i]] <- 
+    exp.plot(g) %>% 
+    pluck(1) +
+    theme(title = element_blank(),
+          axis.title.y = element_blank())
+  }
+
+deg.plots %>% 
+  multi.plot(cols=3, rows=4)
+
+
+
+
+```
+
+
+```{r}
+pbar_annots %>% 
+  filter(gene_name %in% all.degs) %>% 
+  distinct() %>% 
+  DT::datatable()
+
+writeLines("We do not have any information for the following genes:")
+
+p <- pbar_annots %>% 
+  filter(gene_name %in% all.degs) %>% 
+  pull(1) %>% unique()
+setdiff(all.degs, p)
+
+writeLines("Checked NCBI gene database. All four genes are classified as uncharacterized.")
+
+```
+
+
+# Clock genes
+
+```{r, fig.width=10, fig.height=10}
+clock.genes <- c("LOC105430824", # period
+                 "LOC105432451", # clock
+                 "LOC105432453", # CK1 - isoform A (Doubletime)
+                 "LOC105433038", # CK1 - isoform B
+                 "LOC105424116", # CK2 - alpha
+                 
+                 "LOC105424152", # CK2 - beta
+                 "LOC105428546", # PKC
+                 "LOC105427360", # atypical PKC
+                 "LOC105429295", # Gsk3b or Shaggy
+                 "LOC105433421", # nemo
+                 
+                 "LOC105423237", # PP1b
+                 "LOC105423565", # PP1
+                 "LOC105433570", # rhodopsin-like A
+                 "LOC105433575", # rhodopsin-like B
+                 "LOC105424019", # rhodopsin-like C
+                 
+                 "LOC105430942", # mAchR - gar2
+                 "LOC105428149", # mAchR - DM1
+                 "LOC105427051", # DopEcR
+                 "LOC105424889", # PDF receptor
+                 "LOC105424515", # PDF
+                 
+                 "LOC105431243", # lark
+                 "LOC105431457", # Trapped in endoderm 1
+                 "LOC105424638" # Slowpoke
+                 )
+
+clock.plots <- list()
+for (i in 1:length(clock.genes)) {
+  g <- clock.genes[i]
+  clock.plots[[i]] <- 
+    exp.plot(g) %>% 
+    pluck(1) +
+    theme(title = element_blank(),
+          axis.title.y = element_blank())
+  }
+
+clock.plots %>% 
+  multi.plot(cols=5, rows=5)
+```
+
+# Dopamine
+
+```{r, fig.height=6, fig.width=6}
+dopamine.genes <- 
+  pbar_annots %>% 
+  mutate(gene_desc = clean_text(gene_desc)) %>% 
+  filter(str_detect(gene_desc,"dopamine")) %>% 
+  pull(gene_name) %>% 
+  unique()
+
+## One of the Pbar genes (LOC105425404) is mislabelled
+## LOC105425404 should be 5-HT receptor 2B
+
+dopamine.genes <- dopamine.genes[dopamine.genes!="LOC105425404"]
+
+dopamine.plots <- list()
+for (i in 1:length(dopamine.genes)) {
+  g <- dopamine.genes[i]
+  dopamine.plots[[i]] <- 
+    exp.plot(g) %>% 
+    pluck(1) +
+    theme(title = element_blank(),
+          axis.title.y = element_blank())
+  }
+
+pbar_annots %>% 
+  select(gene_name, gene_desc) %>% 
+  filter(gene_name %in% dopamine.genes) %>% 
+  distinct()
+  
+
+dopamine.plots %>% 
+  multi.plot(cols=2, rows=3)
+```
+
+
+# Serotonin
+
+> Only 1 unique found: LOC105428614 | 5-hydroxytryptamine receptor 2A-like
+
+Another gene (LOC105425404) has
+
+```{r, fig.height=5, fig.width=6}
+serotonin.genes <- 
+  pbar_annots %>% 
+  filter(str_detect(gene_desc,"5-hydroxytryptamine")) %>% 
+  pull(gene_name) %>% 
+  unique()
+
+dopa.serotonin.genes <- c(dopamine.genes, serotonin.genes)
+
+dopa.serotonin.plots <- list()
+for (i in 1:length(dopa.serotonin.genes)) {
+  g <- dopa.serotonin.genes[i]
+  dopa.serotonin.plots[[i]] <- 
+    exp.plot(g) %>% 
+    pluck(1) +
+    theme(title = element_blank(),
+          axis.title.y = element_blank())
+  }
+
+
+dopa.serotonin.plots %>% 
+  multi.plot(cols=3, rows=3)
+
+cflo_annots %>% 
+  filter(gene_name %in% pogo_to_cflo(serotonin.genes)) %>% 
+  select(1:2)
+
+```
+
+
+# Behavioral plasticity
+
+```{r, fig.height=12, fig.width=10}
+octopamine.genes <- 
+  pbar_annots %>% 
+  filter(str_detect(gene_desc,"octopamine")) %>% 
+  pull(gene_name) %>% 
+  unique()
+
+jh.genes <- 
+  pbar_annots %>% 
+  filter(str_detect(gene_desc,"juvenile hormone")) %>% 
+  pull(gene_name) %>% 
+  unique()
+
+ecdy.genes <- 
+  pbar_annots %>% 
+  filter(str_detect(gene_desc,"ecdy")) %>% 
+  pull(gene_name) %>% 
+  unique()
+
+plasticity.genes <- c(octopamine.genes,
+                      jh.genes,
+                      ecdy.genes)
+
+
+plasticity.plots <- list()
+for (i in 1:length(plasticity.genes)) {
+  g <- plasticity.genes[i]
+  plasticity.plots[[i]] <- 
+    exp.plot(g) %>% 
+    pluck(1) +
+    theme(title = element_blank(),
+          axis.title.y = element_blank())
+  }
+
+
+plasticity.plots %>% 
+  multi.plot(cols=5, rows=6)
+
+pbar_annots %>% 
+  select(gene_name, gene_desc) %>% 
+  filter(gene_name %in% plasticity.genes) %>% 
+  distinct() %>% 
+  view()
+  
+```
+
+
+## Venom carboxylesterase
+
+```{r, fig.height=3, fig.width=5}
+vg.genes <- 
+  pbar_annots %>% 
+  mutate(gene_desc = clean_text(gene_desc)) %>% 
+  filter(str_detect(gene_desc,"venom carboxylesterase")) %>% 
+  pull(gene_name) %>% 
+  unique()
+
+
+vg.plots <- list()
+for (i in 1:length(vg.genes)) {
+  g <- vg.genes[i]
+  vg.plots[[i]] <- 
+    exp.plot(g) %>% 
+    pluck(1) +
+    theme(title = element_blank(),
+          axis.title.y = element_blank())
+  }
+
+pbar_annots %>% 
+  select(gene_name, gene_desc) %>% 
+  filter(gene_name %in% vg.genes) %>% 
+  distinct()
+  
+
+vg.plots %>% 
+  multi.plot(cols=2, rows=1)
+```
+
+
+# Phase-shifted clock genes
+
+```{r, fig.width=10, fig.height=8}
+phase.shifted.genes <- c("LOC105430824", # period
+                         "LOC105432451", # clock
+                         
+                         "LOC105427360", # atypical PKC
+                         "LOC105433421", # nemo
+
+                         "LOC105430942", # mAchR - gar2
+                         "LOC105427051", # DopEcR
+                         
+                         "LOC105428795", # Dopamine-D2-Receptor
+                         "LOC105428614", # Serotonin 2A Receptor
+                         
+                         "LOC105431076", # Octopamine receptor beta 2R
+                         "LOC105423033", # Octopamine receptro beta 1R
+                         
+                         "LOC105424438", # Ecdysone receptor like
+                         "LOC105422534"  # Ecdysone induced 78C
+                         )
+
+phase.shifted.plots <- list()
+for (i in 1:length(phase.shifted.genes)) {
+  g <- phase.shifted.genes[i]
+  phase.shifted.plots[[i]] <- 
+    exp.plot(g) %>% 
+    pluck(1) +
+    theme(title = element_blank(),
+          axis.title.y = element_blank())
+  }
+
+phase.shifted.plots %>% 
+  multi.plot(cols=3, rows=4)
+```
+
+
+
+
+# SUMMARY CSV FILE
+
+```{r summary_csv, echo=F, include=F}
+# load Cflo gene annotations
+# cflo_annots <- read.csv(paste0(path_to_repo,"/functions/func_data/cflo_annots.csv"),
+#                             header=T, stringsAsFactors = F, na.strings = c(NA,""," "))
+# 
+# # specify path to TC5 data
+# path_to_repo_TC5 = "~/Documents/GitHub/Das_et_al_2021"
+# # load the TC5 database
+# tc5.db <- dbConnect(RSQLite::SQLite(), paste0(path_to_repo_TC5, "/data/TC5_data.db"))
+# ## save the rhythmic genes identified in forager brains 
+# # 24h
+# for24.TC5 <-
+#   tbl(tc5.db, "ejtk_all") %>% 
+#   filter(caste == "for" & rhy == "yes") %>% 
+#   select(gene_name, GammaP) %>% collect() %>% arrange(GammaP) %>%
+#   select(gene_name) %>% pull()
+# # 12h
+# for12.TC5 <- 
+#   tbl(tc5.db, "ejtk_12h_all") %>% 
+#   filter(caste == "for" & rhy == "yes") %>% 
+#   select(gene_name, GammaP) %>% collect() %>% arrange(GammaP) %>% 
+#   select(gene_name) %>% pull()
+# # 08h
+# for08.TC5 <- 
+#   tbl(tc5.db, "ejtk_8h_all") %>% 
+#   filter(caste == "for" & rhy == "yes") %>% 
+#   select(gene_name, GammaP) %>% collect() %>% arrange(GammaP) %>% 
+#   select(gene_name) %>% pull()
+# 
+# ## Genes underlying behavioral plasticity
+#   ## DEGS (foragers v. nurses)
+#   # genes higher expressed in forager brains (v. nurse brains)
+#   for.up <- tbl(tc5.db, "TC5_DEGs_all") %>% filter(upregulation=="for") %>% collect() %>% pull(gene_name)
+#   # genes lower expressed in for. brains (v. nurse brains)
+#   for.down <- tbl(tc5.db, "TC5_DEGs_all") %>% filter(upregulation=="nur") %>% collect() %>% pull(gene_name)
+
+
+### Make the summary file
+# cflo_annots %>% 
+#   select(1:2) %>% 
+#   
+#   # add rhythmic info for forager brains
+#   mutate(rhy_for_brains = ifelse(gene_name %in% for24.TC5, "24h",
+#                               ifelse(gene_name %in% for12.TC5, "12h",
+#                                      ifelse(gene_name %in% for08.TC5, "08h",
+#                                             "not_rhythmic")))) %>%
+#   
+#   
+#   # add rhythmic info for control
+#   mutate(rhy_control = ifelse(gene_name %in% rhy.24[[1]], "24h",
+#                               ifelse(gene_name %in% rhy.12[[1]], "12h",
+#                                      ifelse(gene_name %in% rhy.08[[1]], "08h",
+#                                             "not_rhythmic")))) %>% 
+#   
+#   # add rhythmic info for ophio-infected ants
+#   mutate(rhy_ophio_inf = ifelse(gene_name %in% rhy.24[[2]], "24h",
+#                               ifelse(gene_name %in% rhy.12[[2]], "12h",
+#                                      ifelse(gene_name %in% rhy.08[[2]], "08h",
+#                                             "not_rhythmic")))) %>% 
+#   
+#   # add rhythmic info for beau-infected ants
+#   mutate(rhy_beau_inf = ifelse(gene_name %in% rhy.24[[3]], "24h",
+#                               ifelse(gene_name %in% rhy.12[[3]], "12h",
+#                                      ifelse(gene_name %in% rhy.08[[3]], "08h",
+#                                             "not_rhythmic")))) %>%
+#   
+#   # add DEG info (ophio v. controls)
+#   mutate(DEG_ophio_v_control = ifelse(gene_name %in% ophio.up, "up",
+#                                       ifelse(gene_name %in% ophio.down, "down",
+#                                              "not_DEG"))) %>% 
+#   
+#   # add DEG info (beau v. controls)
+#   mutate(DEG_beau_v_control = ifelse(gene_name %in% beau.up, "up",
+#                                       ifelse(gene_name %in% beau.down, "down",
+#                                              "not_DEG"))) %>%
+#   
+#   # add DEG info (foragers v. nurses)
+#   mutate(DEG_for_v_nur = ifelse(gene_name %in% for.up, "up",
+#                                 ifelse(gene_name %in% for.down, "down",
+#                                        "not_DEG"))) %>% 
+#   
+#   write.csv(.,
+#             file = paste0(path_to_repo, "/results/summary_csv/TC9_summary_rhy_DEGs.csv"),
+#             row.names = F)
+#   
+### DONE.
+  
+
+```
+
+
+## Save list of genes of interest (not run by default)
+```{r save_goi}
+# save(goi.list, file = paste0(path_to_repo,"/results/genes_of_interest/goi_list.RData"))
+```
+

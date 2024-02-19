@@ -1,0 +1,205 @@
+---
+title: "HOBO Data for TC7"
+author: Biplabendu Das
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: united
+    keep_md: no
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = F)
+knitr::opts_chunk$set(message = F)
+
+## For more inspiration on customizing the html output, refer to the following:
+# https://bookdown.org/yihui/rmarkdown/html-document.html#table-of-contents
+
+```
+
+
+# Housekeeping
+
+```{r libs}
+
+rm(list = ls())
+
+path_to_repo <- "/Users/biplabendudas/Documents/GitHub/Das_et_al_2022b"
+
+## load libraries
+pacman::p_load(tidyverse, ggplot2, lubridate, conflicted)
+## load functions
+# customized theme for publication quality figures
+source(paste0(path_to_repo,"/functions/theme_publication.R"))
+
+# summary function
+# Summary function
+# Load functions
+summarySE <- function(data=NULL, measurevar, groupvars=NULL, na.rm=FALSE,
+                      conf.interval=.95, .drop=TRUE) {
+  
+  # New version of length which can handle NA's: if na.rm==T, don't count them
+  length2 <- function (x, na.rm=FALSE) {
+    if (na.rm) sum(!is.na(x))
+    else       length(x)
+  }
+  
+  # This does the summary. For each group's data frame, return a vector with
+  # N, mean, and sd
+  datac <- plyr::ddply(data, groupvars, .drop=.drop,
+                       .fun = function(xx, col) {
+                         c(N    = length2(xx[[col]], na.rm=na.rm),
+                           mean = mean   (xx[[col]], na.rm=na.rm),
+                           sd   = sd     (xx[[col]], na.rm=na.rm)
+                         )
+                       },
+                       measurevar
+  )
+  
+  # Rename the "mean" column    
+  datac <- plyr::rename(datac, c("mean" = measurevar))
+  
+  datac$se <- datac$sd / sqrt(datac$N)  # Calculate standard error of the mean
+  
+  # Confidence interval multiplier for standard error
+  # Calculate t-statistic for confidence interval: 
+  # e.g., if conf.interval is .95, use .975 (above/below), and use df=N-1
+  ciMult <- qt(conf.interval/2 + .5, datac$N-1)
+  datac$ci <- datac$se * ciMult
+  
+  # detach("package:plyr", unload=TRUE)
+  return(datac)
+}
+
+
+## set conflict preference
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflict_prefer("union", "dplyr")
+
+```
+
+Define column names for the exported csv file containing the HOBO data
+
+```{r col_names}
+
+hobo.col.names <- c("date_time", "temp", "humidity", "light")
+```
+
+
+# Experimental Run #1
+
+## Controls, Beau-inf
+
+> Left incu: controls, Right incu: Beau-infected ants
+
+### Step 1: Load data
+
+```{r load_data_1}
+beau.dat <- read.csv(paste0(path_to_repo, "/data/hobo_data/beau/Billu_TC7_Incubator_FA.csv"),
+                     skip = 1, header = T, na.strings = c(" ","","NA"),
+                     stringsAsFactors = F)
+beau.dat <- beau.dat[,2:5]
+colnames(beau.dat) <- hobo.col.names
+
+beau.dat %>% glimpse()  
+```
+
+
+### Step 2: Plot data
+
+```{r plot_1}
+
+hobo.colors <- c(viridis::inferno(100)[5],
+                 viridis::inferno(100)[45],
+                 viridis::inferno(100)[80])
+names(hobo.colors) <- c("temp","humidity","light")
+
+
+## FA
+beau.dat %>% 
+  na.omit() %>% 
+  mutate(date_time = lubridate::parse_date_time(date_time, " %m/%d/%y %I:%M:%S %p")) %>% 
+  
+  filter(date_time >= "2021-04-12" & date_time <= "2021-04-16") %>% 
+  pivot_longer(-date_time, names_to = "env_variable", values_to = "value") %>% 
+  mutate(env_variable = factor(env_variable)) %>% 
+  mutate(env_variable = relevel(env_variable, ref = "temp")) %>% 
+  
+  
+  ggplot() +
+  
+  labs(x = "Date-Time",
+       y = "value",
+       title = "Beau-infections") +
+  
+  geom_line(aes(x=date_time, y=value, col=env_variable), size=1.5, alpha=0.7) +
+  facet_grid(rows = vars(env_variable), scales = "free") +
+  scale_y_continuous(limits = c(0,NA)) +
+  theme_Publication() +
+  scale_color_manual(values = hobo.colors)
+
+```
+
+
+# Experimental Run #2
+
+## Controls, Ophio-inf
+
+> Left incu: controls (no sampling), Right incu: Ophio-infected ants
+
+### Step 1: Load data
+
+```{r load_data_2}
+ophio.dat <- read.csv(paste0(path_to_repo, "/data/hobo_data/ophio/Billu_TC7_Ophio_right_incubator_8May21_1348hrs.csv"),
+                     skip = 1, header = T, na.strings = c(" ","","NA"),
+                     stringsAsFactors = F)
+ophio.dat <- ophio.dat[,2:5]
+colnames(ophio.dat) <- hobo.col.names
+
+ophio.dat %>% glimpse()  
+```
+
+
+### Step 2: Plot data
+
+```{r plot_2}
+
+hobo.colors <- c(viridis::inferno(100)[5],
+                 viridis::inferno(100)[45],
+                 viridis::inferno(100)[80])
+names(hobo.colors) <- c("temp","humidity","light")
+
+
+## FA
+ophio.dat %>% 
+  na.omit() %>% 
+  mutate(date_time = lubridate::parse_date_time(date_time, " %m/%d/%y %I:%M:%S %p")) %>%
+  
+  filter(date_time >= "2021-05-2" & date_time <= "2021-05-6") %>%
+  pivot_longer(-date_time, names_to = "env_variable", values_to = "value") %>% 
+  mutate(env_variable = factor(env_variable)) %>% 
+  mutate(env_variable = relevel(env_variable, ref = "temp")) %>% 
+  
+  
+  ggplot() +
+  
+  labs(x = "Date-Time",
+       y = "value",
+       title = "Ophio-infections") +
+  
+  geom_line(aes(x=date_time, y=value, col=env_variable), size=1.5, alpha=0.7) +
+  facet_grid(rows = vars(env_variable), scales = "free") +
+  scale_y_continuous(limits = c(0,NA)) +
+  theme_Publication() +
+  scale_color_manual(values = hobo.colors)
+
+```
+

@@ -1,0 +1,1446 @@
+---
+title: "Pogo-forager-brains-LD (TC9)"
+author: Biplabendu Das
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: united
+    keep_md: no
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = F)
+knitr::opts_chunk$set(message = F)
+
+## For more inspiration on customizing the html output, refer to the following:
+# https://bookdown.org/yihui/rmarkdown/html-document.html#table-of-contents
+
+```
+
+
+```{r housekeeping, include=FALSE}
+set.seed(420)
+rm(list = ls())
+
+#' Load the libraries
+pacman::p_load(pheatmap, dendextend, tidyverse, viridis)
+pacman::p_load(RSQLite, tidyverse, dbplyr, DT, conflicted, WGCNA, igraph)
+pacman::p_load(patchwork)
+pacman::p_load(GeneOverlap)
+library(timecourseRnaseq)
+
+#' set conflict preference
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflict_prefer("union", "dplyr")
+conflict_prefer("layout", "plotly")
+conflict_prefer("hclust", "flashClust")
+
+## set path to your working directory
+path_to_repo = "~/Documents/05_postdoc/Deborah_Gordon/04_research/2022/04_timecourse_RNASeq"
+
+## set path to the figures
+path_to_figures = paste0(path_to_repo, "/results/figures/02_pogo_GCN/")
+
+## load functions
+# customized theme for publication quality figures
+source(paste0(path_to_repo,"/functions/theme_publication.R"))
+# customized functions for plotting 
+source(paste0(path_to_repo, "/functions/plot_zscores.R"))
+
+
+## Fisher's exact test
+fishers_overlap <- function(set.1, set.2, bg.genes=13808) {
+  set.1 <- as.character(set.1) # expressed in control heads
+  set.2 <- as.character(set.2) # expressed in ophio-inf or beau-inf heads
+  
+  tot.genes <- as.numeric(bg.genes) # all genes in the Cflo genome
+  
+  # To create the contingency table for module-7 (set-1) and for.rhy (set-2), we will need the following information:
+  # genes that are in both sets
+  overlapping.genes <- intersect(set.1, set.2) %>% length()
+  # genes in set-1 but not in set-2
+  set.1.not.set.2 <- setdiff(set.1, set.2) %>% length()
+  # genes in set-2 but not in set-1
+  set.2.not.set.1 <- setdiff(set.2, set.1) %>% length()
+  # background genes not in set-1 or set-2
+  not.set.1.set.2 <- tot.genes - (union(set.1, set.2) %>% unique() %>% length())
+  
+  # Contingency table for set.1 and set.2
+  test.table <- 
+    data.frame(
+      in.set.2 = c(overlapping.genes, set.2.not.set.1),
+      not.set.2 = c(set.1.not.set.2, not.set.1.set.2)
+    )
+  rownames(test.table) <- c("in.set.1", "not.set.1")
+  
+  writeLines(paste0("Contingency table:\n"))
+  # take a look at the contingency table
+  test.table %>% print()
+  
+  writeLines(paste0("Running fisher.test() on contingency table:\n"))
+  # fisher test
+  fisher.test(test.table) %>% print()
+}
+```
+
+> Loading one-to-one orthologs between P. barbatus and C. floridanus
+
+```{r load_pbar_cflo_orthologs}
+path_to_pogodata <- paste0(path_to_repo,"/data/gordon_data/")
+pogo.cflo <-
+  read.csv(paste0(path_to_pogodata, "pogo_cflo_orthologs.csv"),
+           header = T, stringsAsFactors = F, na.strings = c(""," ",".", "NA")) %>%
+  as_tibble() %>% 
+  select(cflo_gene,pogo_gene) %>% 
+  distinct()
+
+# make a function that takes pogo names and returns cflo names
+pogo_to_cflo <- function(geneset) {
+  cflo_genes <- 
+    pogo.cflo %>% 
+    filter(pogo_gene %in% geneset) %>% 
+    pull(cflo_gene) %>% 
+    unique() %>% 
+    as.character()
+  
+  return(cflo_genes)
+}
+
+# make a function that takes pogo names and returns cflo names
+cflo_to_pogo <- function(geneset) {
+  pogo_genes <- 
+    pogo.cflo %>% 
+    filter(cflo_gene %in% geneset) %>% 
+    pull(pogo_gene) %>% 
+    unique() %>% 
+    as.character()
+  
+  return(pogo_genes)
+}
+
+```
+
+
+## Overview/Goals
+
+Using time-course RNASeq data from healthy Cflo forager heads: 
+
+- build a circadian gene co-expression network (GCN), 
+- annotate the network using published data,
+
+## Step 1: Build circadian GCN
+
+### 1.1 Load data
+
+Datasets: 
+
+- Cflo forager ant brains - LD  (Das and de Bekker 2022)
+
+```{r load_cflo_data}
+# Specify the path to TC5 database
+path_to_tc5_repo = "~/Documents/GitHub/Das_et_al_2021"
+# Load the TC5 database
+tc5.db <- dbConnect(RSQLite::SQLite(), 
+                    paste0(path_to_tc5_repo,"/data/TC5_data.db"))
+
+# Specify the path to the result-summary from de Bekker and Das 2021
+path_to_tc5_results <- paste0(path_to_tc5_repo, "/results/gene_lists/")
+## load genes of interest
+cflo.for24nur8 <- read.csv(paste0(path_to_tc5_results, "for24nur8_all.csv")) %>% pull(gene_name) %>% unique()
+cflo.for24 <- read.csv(paste0(path_to_tc5_results, "for24_all.csv")) %>% pull(gene_name) %>% unique()
+cflo.for12 <- read.csv(paste0(path_to_tc5_results, "for12_all.csv")) %>% pull(gene_name) %>% unique()
+cflo.for8 <- read.csv(paste0(path_to_tc5_results, "for8_all.csv")) %>% pull(gene_name) %>% unique()
+```
+
+- Pogo forager ant brains - LD 
+- Pogo forager ant brains - DD
+
+```{r load_data}
+# SAMPLE NAME
+## specify sample name
+sample.name <- c("pbar_ld","pbar_dd")
+
+## SPECIFY THE DATASET
+which.sample <- sample.name[1]
+
+writeLines(paste0("Selected Dataset: ", which.sample))
+
+# LOAD DATABASES (TC9)
+## 1. TC9_ejtk.db
+ejtk.db <- dbConnect(RSQLite::SQLite(),
+                   paste0(path_to_repo, "/data/databases/TC9_ejtk.db"))
+
+## 2. TC9_data.db
+data.db <- dbConnect(RSQLite::SQLite(),
+                     paste0(path_to_repo, "/data/databases/TC9_data.db"))
+
+
+# extract the (gene-expr X time-point-of-sampling) data
+dat <-
+  data.db %>%
+  tbl(., paste0(which.sample ,"_fpkm")) %>%
+  select(gene_name, everything()) %>%
+  collect()
+
+writeLines("What is the dimensions of the original dataset? [Rows = #genes, Cols = #samples]")
+dim(dat[-1])
+
+```
+
+### 1.2 Clean data
+
+The above dataset contains all genes (n=12,557) in the ant genome. 
+However, not all of these genes are expressed in the ant head, and some are expressed at very low levels that are not biologically meaningful. Therefore, we will only keep the genes that are "expressed" (≥1 FPKM for at least half of all time points) in the ant head.
+
+```{r clean_data}
+# Which genes are expressed throughout the day in forager heads?
+  # count the number of time points that has ≥ 1 FPKM
+  n.expressed <- apply(dat[-1], 1, function(x) sum(x >= 1))
+  # subset the data and only keep the filtered genes
+  dat <- dat[which(n.expressed >=6),]
+
+writeLines("Dimensions of the data post-filtering step [Rows = #genes, Cols = #samples]")
+dim(dat)
+
+```
+
+This is our cleaned, input data file for building the circadian GCN. 
+
+
+### 1.3 Format data
+
+- Log2 transform the data
+
+```{r format_data, fig.height=6, fig.width=6}
+
+datExpr = as.data.frame(t(log2(dat[-c(1)]+1)))
+names(datExpr) = dat$gene_name
+rownames(datExpr) = names(dat)[-c(1)]
+
+# USE THE FOLLOWING CODE TO CHECK IF YOU HAVE ANY BAD SAMPLES #
+  # gsg = goodSamplesGenes(datExpr, verbose = 3);
+  # gsg$allOK
+
+  # sampleTree = hclust(dist(datExpr0), method = "average");
+  # # Plot the sample tree: Open a graphic output window of size 12 by 9 inches
+  # # The user should change the dimensions if the window is too large or too small.
+  # sizeGrWindow(12,9)
+  # #pdf(file = "Plots/sampleClustering.pdf", width = 12, height = 9);
+  # par(cex = 1);
+  # par(mar = c(0,4,2,0))
+  # plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="", cex.lab = 1.5,
+  #      cex.axis = 1.5, cex.main = 2)
+
+# save the number of genes and samples
+# that will be used to create the circadian GCN
+nGenes = ncol(datExpr)
+nSamples = nrow(datExpr)
+
+# visualize the log-transformed data
+x = reshape2::melt(as.matrix(t(datExpr)))
+colnames(x) = c('gene_id', 'sample', 'value')
+
+writeLines("Visualizing the log-transformed data")
+ggplot(x, aes(x=value, color=sample)) + geom_density() + theme_Publication()
+
+```
+
+### 1.4 Calculate gene-gene similarity
+
+```{r gene_sim_matrix, fig.height=6, fig.width=6}
+# Calculate Kendall's tau-b correlation for each gene-gene pair
+# sim_matrix <- cor((datExpr), method = "kendall") # this step takes time
+# save(sim_matrix, 
+#      file = paste0(path_to_repo, "/results/wgcna_files/ref",
+#                    which.sample,"sim_matrix_", sample.name[1], "_TC9.RData")) # might be useful to save the sim_matrix and
+load(paste0(path_to_repo, "/results/wgcna_files/ref",
+                   which.sample,"sim_matrix_", sample.name[1], "_TC9.RData")) # load it up
+
+## Let's display a chunk of the matrix (code from Hughitt 2016; github)
+heatmap_indices <- sample(nrow(sim_matrix), 200)
+
+writeLines(paste0("Plotting a chunk of the gene-gene similarity matrix with ", length(heatmap_indices), " genes."))
+gplots::heatmap.2(t(sim_matrix[heatmap_indices, heatmap_indices]),
+          col=inferno(100),
+          labRow=NA, labCol=NA,
+          trace='none', dendrogram='row',
+          xlab='Gene', ylab='Gene',
+          main= paste0("Similarity matrix \n correlation method = 'kendall' \n (", length(heatmap_indices), " random genes)"),
+          density.info='none', revC=TRUE)
+
+```
+
+### 1.5 Create adjacency matrix
+
+- To create the adjacency matrix, we need to first identify the soft-thresholding power (see WGCNA for more info).
+
+```{r soft_thresholding_power, fig.height=6, fig.width=8}
+writeLines("Performing network topology analysis to pick soft-thresholding power")
+# Choose a set of soft-thresholding powers
+powers = c(c(1:10), seq(from = 12, to=30, by=2))
+# # Call the network topology analysis function
+sft = pickSoftThreshold(datExpr, powerVector = powers, verbose = 5)
+
+writeLines("Plotting the resutls from the network topology analysis")
+# Plot the results:
+# sizeGrWindow(9, 5)
+par(mfrow = c(1,2));
+cex1 = 0.9;
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+     main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,cex=cex1,col="red");
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.70,col="red")
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+     main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+
+```
+
+> NOTE: The scale-free topology fit index reaches ~0.70 at a soft-thresholding-power=12.
+
+Now, we can go ahead and create our adjacency matrix by power-transforming the similarity matrix (see WGCNA for more info).
+
+```{r adjacency_matrix, fig.height=6, fig.width=6}
+## Specify the soft-thresholding-power
+soft.power = 12
+
+# Construct adjacency matrix
+# adj_matrix <- adjacency.fromSimilarity(sim_matrix,
+#                                        power=soft.power,
+#                                        type='signed'
+#                                         )
+# save(adj_matrix, 
+#      file = paste0(path_to_repo, "/results/wgcna_files/ref",
+#                    which.sample,"adj_matrix_", sample.name[1], "_TC9.RData")) # might be useful to save the sim_matrix and
+load(paste0(path_to_repo, "/results/wgcna_files/ref",
+                   which.sample,"adj_matrix_", sample.name[1], "_TC9.RData")) # load it up
+
+
+# Convert adj_matrix to matrix
+gene_ids <- rownames(adj_matrix)
+
+adj_matrix <- matrix(adj_matrix, nrow=nrow(adj_matrix))
+rownames(adj_matrix) <- gene_ids
+colnames(adj_matrix) <- gene_ids
+
+writeLines(paste0("Plotting the power-transformed adjacency matrix for the same ", length(heatmap_indices)," genes as above"))
+## Same heatmap as before, but now with the power-transformed adjacency matrix
+gplots::heatmap.2(t(adj_matrix[heatmap_indices, heatmap_indices]),
+                  col=inferno(100),
+                  labRow=NA, labCol=NA,
+                  trace='none', dendrogram='row',
+                  xlab='Gene', ylab='Gene',
+                  main='Adjacency matrix',
+                  density.info='none', revC=TRUE)
+
+## Delete similarity matrix to free up memory
+rm(sim_matrix)
+gc()
+
+```
+
+***
+
+## Step 2: Identify gene clusters
+
+The following steps are performed as per guidelines from the WGCNA package and several tutorials made available online.
+
+### 2.1 Create topological overalp matrix
+
+```{r adj_to_TOM, fig.height=4, fig.width=8}
+# # Turn adjacency into topological overlap
+# TOM = TOMsimilarity(adj_matrix);
+# dissTOM = 1-TOM
+# save(dissTOM, 
+#      file = paste0(path_to_repo, "/results/wgcna_files/ref",
+#                    which.sample,"dissTOM_", sample.name[1], "_TC9.RData")) # might be useful to save the sim_matrix and
+load(paste0(path_to_repo, "/results/wgcna_files/ref",
+                   which.sample,"dissTOM_", sample.name[1], "_TC9.RData")) # load it up
+
+# Call the hierarchical clustering function
+geneTree = hclust(as.dist(dissTOM), method = "average")
+
+writeLines("Plotting the resulting clustering tree (dendrogram)")
+# sizeGrWindow(12,9)
+# reset plotting parameter
+par(mfrow = c(1,1))
+plot(geneTree, xlab="", sub="", main = "Gene clustering on TOM-based dissimilarity",
+     labels = FALSE, hang = 0.04)
+
+```
+
+### 2.2 Identify clusters
+
+User defined parameters:
+
+- minimum size (number of genes) of modules | var-name: minModuleSize
+
+```{r identify_clusters}
+# We like large modules, so we set the minimum module size relatively high:
+minModuleSize = 50;
+
+# Module identification using dynamic tree cut:
+dynamicMods= cutreeDynamic(dendro = geneTree,
+                           distM = dissTOM,
+                           method = "hybrid",
+                           verbose = 4,
+                           deepSplit = 3, # see WGCNA for more info on tuning parameters
+                           pamRespectsDendro = FALSE,
+                           minClusterSize = minModuleSize);
+
+# view number of genes in each module
+# table(dynamicMods)
+
+writeLines("How many genes are there in each of the initial modules (clusters) detected?
+Note: The names of the modules (colors) have no meaning.")
+# Convert numeric lables into colors
+dynamicColors = WGCNA::labels2colors(dynamicMods)
+table(dynamicColors)
+
+```
+
+### 2.3 Merge similar modules
+
+User defined parameters:
+
+- minimum correlation between two modules above which they are merged into one | var-name: MEDissThres
+
+
+```{r refine_cluster, fig.height=4, fig.width=8}
+# Calculate eigengenes
+MEList = WGCNA::moduleEigengenes(datExpr, colors = dynamicColors)
+MEs = MEList$eigengenes
+
+# Calculate dissimilarity of module eigengenes
+MEDiss = 1-cor(MEs, method = "kendall");
+
+writeLines("Clustering the module eigengenes and identifying a cutoff to merge similar modules")
+# Cluster module eigengenes
+METree = hclust(as.dist(MEDiss), method = "average");
+# Plot the result
+# sizeGrWindow(7, 8)
+plot(METree, main = "Clustering of module eigengenes",
+     xlab = "", sub = "MEDiss = 1-cor(MEs, method = 'kendall')")
+
+# We choose a height cut of 0.25, corresponding to correlation of 0.75, to merge
+MEDissThres = 0.25 # user-specified parameter value; see WGCNA manual for more info
+
+# Plot the cut line into the dendrogram
+abline(h=MEDissThres, col = "red")
+
+writeLines(paste0("Merging modules that have a correlation ≥ ", 1-MEDissThres))
+# Call an automatic merging function
+merge = WGCNA::mergeCloseModules(datExpr, dynamicColors, cutHeight = MEDissThres, verbose = 3)
+
+# The merged module colors
+mergedColors = merge$colors;
+# Eigengenes of the new merged modules:
+mergedMEs = merge$newMEs;
+
+writeLines("Plotting the identified clusters (denoted with colors) before and after merging.")
+# sizeGrWindow(12, 9)
+WGCNA::plotDendroAndColors(geneTree,
+                    cbind(dynamicColors, mergedColors),
+                    c("Dynamic Tree Cut", "Merged dynamic"),
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+
+# Rename to moduleColors
+moduleColors = mergedColors
+
+# Construct numerical labels corresponding to the colors
+colorOrder = c("grey", 
+               WGCNA::standardColors(50));
+moduleLabels = match(moduleColors, colorOrder)-1
+
+```
+
+### 2.4 Calculate module-module similarity
+
+```{r module_sim_matrix, fig.height=6, fig.width=6}
+writeLines("Calculating module-module similarity based on module-eigengene-expression.")
+# Calculate similarity of the eigen-genes
+sim_matrix_ME <- cor(mergedMEs, method = "kendall")
+
+# calculate adj_matrix
+adj_matrix_ME <- WGCNA::adjacency.fromSimilarity(sim_matrix_ME,
+                                          power=1, # DO NOT power transform
+                                          type='signed'
+)
+
+## CHANGE THE NAMES OF THE MODULES;
+module_ids <- data.frame(
+  old_labels = rownames(adj_matrix_ME) %>% str_split("ME", 2) %>% sapply("[", 2) %>% as.character(),
+  new_labels = paste0("C", 1:nrow(adj_matrix_ME)))
+# and coerce into matrix
+adj_matrix_ME <- matrix(adj_matrix_ME, nrow=nrow(adj_matrix_ME))
+rownames(adj_matrix_ME) <- module_ids$new_labels
+colnames(adj_matrix_ME) <- module_ids$new_labels
+
+# ## KEEP THE SAME MODULE NAMES (named by color)
+# gene_ids <- rownames(adj_matrix_ME)
+# # coerce into a matrix
+# adj_matrix_ME <- matrix(adj_matrix_ME, nrow=nrow(adj_matrix_ME))
+# rownames(adj_matrix_ME) <- gene_ids
+# colnames(adj_matrix_ME) <- gene_ids
+
+writeLines("Plotting the adjacency matrix that shows module-module similarity in expression")
+gplots::heatmap.2(t(adj_matrix_ME),
+                  col=inferno(100),
+                  # labRow=NA, labCol=NA,
+                  trace='none', dendrogram='row',
+                  xlab='', ylab='',
+                  # main='Similarity matrix - MEs \n correlation method = "kendall")',
+                  main='Adjacency matrix - MEs \n (module-module similarity)',
+                  density.info='none', revC=TRUE)
+
+
+```
+
+### 2.5 Visualize the network
+
+```{r visualize_network, fig.height=8, fig.width=8}
+pacman::p_load(igraph)
+
+adj_matrix_ME_igraph <- adj_matrix_ME
+
+# get rid of low correlations (0.6 & 0.8 are arbitrary) [0.7 and 0.9]
+adj_matrix_ME_igraph[adj_matrix_ME_igraph < 0.6] <- 0
+adj_matrix_ME_igraph[adj_matrix_ME_igraph < 0.8 & adj_matrix_ME_igraph>0] <- 0.5
+adj_matrix_ME_igraph[adj_matrix_ME_igraph >= 0.9] <- 1
+
+# build_network
+network <- graph.adjacency(adj_matrix_ME_igraph,
+                           mode = "upper",
+                           weighted = T,
+                           diag = F)
+
+# simplify network
+network <- igraph::simplify(network)  # removes self-loops
+
+# remove isolated vertices (keep only the nodes)
+isolated <- which(degree(network)==0)
+network <- igraph::delete.vertices(network, isolated)
+
+# E(network)$width <- E(network)$weight + min(E(network)$weight) + 1 # offset=1
+
+# colors <- as.character(module_ids$old_labels)
+# V(network)$color <- colors
+V(network)$color <- "white"
+
+# genes_ME <- factor(moduleColors, levels=colors) %>% summary()
+V(network)$size <- igraph::degree(network, mode = "all")*3
+# V(network)$size <- log2(genes_ME)^1.3
+
+V(network)$label.color <- "black"
+V(network)$frame.color <- "black"
+
+E(network)$width <- E(network)$weight^2*4
+E(network)$color <- "black"
+
+# ## highlight shortest paths between two vetices
+# short.path <- igraph::get.shortest.paths(network, "S_5", "S_15")
+# E(network, path = unlist(short.path[[1]]))$color <- col.scheme[2]
+# E(network, path = unlist(short.path[[1]]))$width <- E(network)$weight*8
+
+writeLines("Visualizing a simplified representation of the circadian GCN, with and without labels")
+
+# trash <- dev.off()
+# par(mfrow = c(1,1))
+    
+# png(paste0(path_to_repo, "/results/figures/", sample.name[1], "/", script.name,"/", sample.name[1],"_GCN_2.png"),
+#     width = 20, height = 30, units = "cm", res = 600)
+# par(bg=NA)
+plot(network,
+     size=20,
+     layout=layout.kamada.kawai,
+       # layout=layout.fruchterman.reingold,
+       # layout=layout.graphopt,
+       # layout=layout_in_circle,
+     # vertex.label=NA
+     vertex.size=hub.score(network)$vector*30
+     # vertex.shape="none"
+)
+# dev.off()
+
+```
+
+
+## Step 3: Annotate the network
+
+#### list of module x genes
+
+```{r module_genes_list}
+# Make a list that returns gene names for a given cluster
+module_genes <- list()
+
+modules.to.exclude <- c("")
+# modules.to.exclude <- c(paste0("C",c(2,5,6,7,10:17,19)))
+which.modules <- module_ids %>% filter(!new_labels %in% modules.to.exclude) %>% pull(old_labels)
+which.labels <- module_ids %>% filter(!new_labels %in% modules.to.exclude) %>% pull(new_labels)
+
+# Get the genes from each of the modules
+for (i in 1:length(which.modules)) {
+  
+  # which color
+  mod.color = as.character(which.modules[[i]])
+  
+  # subset
+  module_genes[[i]] <- names(datExpr)[which(moduleColors==mod.color)]
+  names(module_genes)[[i]] <- as.character(which.labels[[i]])
+}
+# # check the result | works
+# names(module_genes)
+# module_genes['C22']
+
+# [13 Dec 2021]
+# Save a csv with the module identity information for all genes used in building the GCN
+# make a dataframe with gene_name and module_identity
+for (i in 1:length(module_genes)){
+  if (i == 1){
+    pbar.ld.mods <- data.frame(gene_name = module_genes[[i]],
+                                    module_identity = as.character(names(module_genes)[i]))
+  }
+  else{
+   foo <- data.frame(gene_name = module_genes[[i]],
+                                    module_identity = as.character(names(module_genes)[i]))
+    pbar.ld.mods <- rbind(pbar.ld.mods, foo) 
+  }
+  
+}
+
+# save the dataframe as a csv
+pbar.ld.mods %>%
+  left_join(module_ids, by = c("module_identity" = "new_labels")) %>%
+  write.csv(.,
+            paste0(path_to_repo,
+                   "/results/wgcna_files/res/pbar_ld_module_identity_new_labels.csv"),
+            row.names = F)
+# done.
+
+# # save a copy with all the gene annotations
+# # load Cflo gene annotations
+# cflo_annots <- read.csv(paste0(path_to_repo,"/functions/func_data/cflo_annots.csv"),
+#                             header=T, stringsAsFactors = F, na.strings = c(NA,""," "))
+# pbar.ld.mods %>%
+#   left_join(cflo_annots, by="gene_name") %>% head()
+#   write.csv(.,
+#             paste0(path_to_repo,
+#                    "/results/WGCNA/cflo/cflo_heads_control_module_identity_new_labels_annots.csv"),
+#             row.names = F)
+
+
+
+```
+
+### 3.1 Load genes of interest
+
+```{r load_rhy_genes}
+
+# load the list of all genes of interest
+load(file = paste0(path_to_repo,"/results/genes_of_interest/goi_list.RData"))
+
+sapply(goi.list[[1]][[1]], length)
+```
+
+### 3.4 Where are my genes of interest located?
+
+#### make your gene sets (character vectors)
+
+```{r GOIs}
+## Rhythmic genes
+rhy24.ld <- goi.list[[1]][[1]][[1]]
+rhy24.dd <- goi.list[[1]][[2]][[1]]
+
+## Ultradian genes
+rhy12.ld <- goi.list[[1]][[1]][[2]]
+rhy12.dd <- goi.list[[1]][[2]][[2]]
+rhy08.ld <- goi.list[[1]][[1]][[3]]
+rhy08.dd <- goi.list[[1]][[2]][[3]]
+
+# ## DRGs
+# for.brain.head.rhy24.cluster1 <- goi.list[[2]]
+# for24.nur8 <- goi.list[[6]][[1]]
+```
+
+
+
+#### Comparison
+
+> Modules vs. Rhythmic genes
+
+```{r comparison_full, fig.height=6, fig.width=14}
+writeLines("#####################################################
+How many genes are in each of my geneset of interest?
+#####################################################")
+
+## MAKE YOUR LIST OF GENES OF INTEREST ##
+
+# LIST ONE - WGCNA modules
+list1 <- module_genes
+writeLines("List of interesting genes #1
+----------------------------
+Genes in each of the identified gene-clusters or modules")
+sapply(list1, length)
+
+## LIST TWO - rhythmic genes
+list2 <- list(rhy24.ld,
+              rhy24.dd,
+              
+              rhy12.ld,
+              rhy12.dd,
+              
+              rhy08.ld,
+              rhy08.dd
+              )
+writeLines("List of interesting genes #2
+----------------------------
+Rhythmic genes in control Cflo heads")
+names(list2) <- c("rhy24-Pbar-LD",
+                  "rhy24-Pbar-DD",
+                  
+                  "rhy12-Pbar-LD",
+                  "rhy12-Pbar-DD",
+                  
+                  "rhy08-Pbar-LD",
+                  "rhy08-Pbar-DD"
+                  )
+sapply(list2, length)
+
+
+## CHECK FOR OVERLAP
+
+## make a GOM object
+gom.1v2 <- newGOM(list2, list1,
+       genome.size = nGenes)
+# png(paste0(path_to_repo, "/results/figures/",
+#            "02_pogo_GCN/",
+#            sample.name[1],"_gom_1v2.png"),
+#     width = 35, height = 15, units = "cm", res = 300)
+drawHeatmap(gom.1v2,
+              adj.p=T,
+              cutoff=0.05,
+              what="odds.ratio",
+              # what="Jaccard",
+              log.scale = T,
+              note.col = "orange")
+# trash <- dev.off()
+
+ # writeLines("How many genes exactly are overlapping between the pairwise comparisons")
+# getMatrix(gom.1v4, name = "intersection") %>% t()
+
+writeLines("Visualizing the significant overlaps between your lists of interesting genes and the identified modules")
+
+```
+
+
+
+
+
+
+***
+
+## PLOT MODULE EXPRESSION
+
+```{r plot_modules, fig.height=10, fig.width=5}
+which.modules <- c("C1","C2",
+                   "C4", "C3",
+                   "C11","C10",
+                   "C9")
+module.plots <- list()
+for (i in 1: length(which.modules)) {
+  
+  writeLines(paste0("Plotting expression for module ",
+                    which.modules[i]))
+  module.plots[[i]] <-
+    module_genes[[which.modules[[i]]]] %>%
+    stacked.zplot(bg.alpha = .08, alpha = 1) %>% 
+    multi.plot(rows = 2, cols = 1)
+
+}
+
+# png(paste0(path_to_repo, "/results/figures/", sample.name[1],"module_exp.png"),
+#     width = 25, height = 40, units = "cm", res = 400)
+# module.plots %>%
+#   multi.plot(rows = 3, cols = 2)
+# trash <- dev.off()
+```
+
+
+
+***
+
+## Step 5: Network statistics
+
+From [WGCNA-tutorial](https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/Rpackages/WGCNA/Tutorials/Simulated-07-Membership.pdf)
+
+
+### 5.1 Intramodular connectivity
+
+"We begin by calculating the intramodular connectivity for each gene. (In network literature, connectivity is often referred to as ”degree”.) The function intramodularConnectivity computes:
+
+- the whole network connectivity *kTotal*,
+- the within (intra)module connectivity *kWithin*, 
+- the extra-modular connectivity *kOut*=kTotal-kWithin, and 
+- the difference of the intra- and extra-modular connectivities *kDiff*=kIn-kOut=2*kIN-kTotal
+
+```{r}
+# From what I can tell, colorh1 in the tutorial refers to moduleColors
+colorh1 <- moduleColors
+
+# Calculate the connectivities of the genes
+Alldegrees1=intramodularConnectivity(adjMat = adj_matrix, colors = colorh1)
+Alldegrees1 <- 
+  Alldegrees1 %>% 
+    rownames_to_column("gene_name") %>% 
+    mutate_at(vars(starts_with("k")), 
+              function(x){
+                round(x,2)
+                })
+head(Alldegrees1)
+```
+
+
+### 5.2 (Module Membership) 
+
+Generalizing intramodular connectivity for all genes
+
+"The intramodular connectivity measure is only defined for the genes inside a given module. But in practice it can be very important to measure how connected a given genes is to biologically interesting modules. Toward this end, we define a module eigengene-based connectivity measure for each gene as the correlation between a the gene expression and the module eigengene. 
+
+Specifically,
+
+kMEbrown(i) = cor(xi,MEbrown)
+
+where xi is the gene expression profile of gene i and MEbrown is the module eigengene of the brown module. Note: that the definition does not require that gene i is a member of the brown module. We define a data frame containing the module membership (MM) values for each module. In the past, we called the module membership values kME."
+
+> Calculate the signed kME and display the first few rows/columns.
+
+```{r}
+datKME=signedKME(datExpr, mergedMEs, outputColumnName="")
+# Display the first few rows of the data frame
+datKME[1:6,1:6]
+```
+
+> Let's plot the connectivity vs. module-membership values for all identified clusters.
+
+```{r}
+# colorlevels=as.character(module_ids$old_labels)
+# # sizeGrWindow(9,6)
+# 
+# png(paste0(path_to_repo, "/results/figures/", sample.name[1],"/", script.name, "/",
+#            sample.name[1],"_connectivity_kWithin_v_modulemembership.png"), 
+#     width = 30, height = 40, units = "cm", res = 300)
+# 
+# par(mfrow=c(as.integer(0.5+length(colorlevels)/4), 4))
+# par(mar = c(3,3,2,2))
+# # par(mar = c(4,5,3,1))
+# for (i in c(1:length(colorlevels))) {
+# whichmodule=colorlevels[[i]];
+# restrict1 = (colorh1==whichmodule);
+# verboseScatterplot(Alldegrees1$kWithin[restrict1],
+#                    datKME[restrict1, whichmodule],
+#                     col= rgb(red=169, green=169, blue=169, alpha = 80, maxColorValue = 255),
+#                     # bg = colorh1[restrict1],
+#                     bg = rgb(red=169, green=169, blue=169, alpha = 30, maxColorValue = 255),
+#                     pch = 21,
+#                     lwd = 1.5,
+#                     cex = 1.2,
+#                    
+#                     # main=whichmodule,
+#                     main=module_ids %>% filter(old_labels==whichmodule) %>% pull(new_labels) %>% as.character(),
+#                     xlab = "Connectivity_kWithin", ylab = "Module-membership", abline = TRUE)
+# }
+# 
+# trash <- dev.off()
+```
+
+```{r plot_kWithin_v_KME, echo = FALSE, fig.align='center', fig.cap='Connectivity_kWithin (x-axis) v. Module membership (y-axis)', out.width="75%"}
+# knitr::include_graphics(paste0(path_to_repo, "/results/figures/", sample.name[1],"/", script.name, "/", sample.name[1],"_connectivity_kWithin_v_modulemembership.png"))
+```
+
+Plotting the mean (± 95% CI) connectivity of genes in different modules
+
+```{r, fig.height=6, fig.width=4}
+# 
+# # Make the summary function (borrowed)
+# summarySE <- function(data=NULL, measurevar, groupvars=NULL, na.rm=FALSE,
+#                       conf.interval=.95, .drop=TRUE) {
+#   
+#   # New version of length which can handle NA's: if na.rm==T, don't count them
+#   length2 <- function (x, na.rm=FALSE) {
+#     if (na.rm) sum(!is.na(x))
+#     else  length(x)
+#   }
+#   
+#   # This does the summary. For each group's data frame, return a vector with
+#   # N, mean, and sd
+#   datac <- plyr::ddply(data, groupvars, .drop=.drop,
+#                        .fun = function(xx, col) {
+#                          c(N    = length2(xx[[col]], na.rm=na.rm),
+#                            mean = mean(xx[[col]], na.rm=na.rm),
+#                            sd   = stats::sd(xx[[col]], na.rm=na.rm)
+#                          )
+#                        },
+#                        measurevar
+#   )
+#   
+#   # Rename the "mean" column    
+#   datac <- plyr::rename(datac, c("mean" = measurevar))
+#   
+#   datac$se <- datac$sd / sqrt(as.numeric(datac$N))  # Calculate standard error of the mean
+#   
+#   # Confidence interval multiplier for standard error
+#   # Calculate t-statistic for confidence interval: 
+#   # e.g., if conf.interval is .95, use .975 (above/below), and use df=N-1
+#   ciMult <- qt(conf.interval/2 + .5, datac$N-1)
+#   datac$ci <- datac$se * ciMult
+#   
+#   return(datac)
+# }
+
+pd <- position_dodge(0.1)
+
+Alldegrees1 %>% 
+  # rownames_to_column("gene_name") %>% 
+  left_join(pbar.ld.mods, by="gene_name") %>%
+  
+  # PLOT FROM RAW DATA
+  mutate(module_identity = factor(module_identity, 
+                                  levels = paste0("C",1:nrow(module_ids)))) %>%
+  
+  # ggplot(aes(x=module_identity, y=kTotal)) +
+  # # ggplot(aes(x=module_identity, y=kWithin)) +
+  # 
+  #   geom_hline(yintercept = 45, col="darkgrey", alpha=0.8) +
+  #   geom_hline(yintercept = 30, col="darkgrey", alpha=0.8) +
+  #   # geom_hline(yintercept = 75, col="darkgrey", alpha=0.8) +
+  # 
+  #   geom_boxplot(fill="lightgrey",
+  #                alpha=0.6,
+  #                outlier.color = "grey60",
+  #                position = "dodge2") +
+  #   
+  #   theme_Publication() +
+  #   scale_colour_Publication() +
+  #   xlab("") +
+  #   ggtitle("") +
+  # 
+  #   ylab("Total connectivity") +
+  #   # ylab("Intramodular connectivity") +
+  # 
+  #   theme(text = element_text(size = 20, colour = 'black'),
+  #         legend.position = "none",
+  #         axis.line.y = element_line(colour = "transparent",size=1)) +
+  #   coord_flip()
+  
+  
+  # SUMMARIZE DATA AND PLOT
+  # summarySE(., measurevar = "kWithin", groupvars = "module_identity") %>%
+  summarySE(., measurevar = "kTotal", groupvars = "module_identity") %>%
+
+  # make the value column
+  mutate(value=kTotal) %>%
+  mutate(module_identity = factor(module_identity,
+                                  levels = paste0("C",1:nrow(module_ids)))) %>%
+
+  # Plot
+  ggplot(aes(x=((module_identity)), y=value)) +
+
+    theme_Publication() +
+    scale_colour_Publication() +
+    xlab("") +
+    ylab("Total connectivity") +
+    ggtitle("") +
+    #
+    # theme(axis.title.x = element_blank(),
+    #       axis.title.y = element_blank(),
+    #       legend.position='none',
+    #       # legend.title = element_text(size = 15, colour = 'black'),
+    #       legend.text = element_blank()) +
+    # ## center align the title
+    # theme(plot.title = element_blank()) +
+    #
+    # scale_x_continuous(breaks = c(0,12,24)) +
+    #scale_y_continuous(limits = c(0,40)) +
+
+    # theme(panel.grid.major.x = element_line(colour = "#808080", size=0.1),
+    #       panel.grid.major.y = element_line(colour = "#808080", size=0.2)) +
+    # ## if you need highlighting parts of the graph
+    # geom_rect(aes(xmin = 11.8, xmax = 23.8, ymin = -Inf, ymax = Inf),
+    #           fill = "lightgrey", alpha = 0.02, color=NA) +
+
+    # geom_line(position=pd,
+    #           col="#F2CB05", size=2, alpha=1) + # total
+    #           # col="#BF0404", size=2, alpha=1) + # FS
+    #           # col="#0FBF67", size=2, alpha=1) + # FA
+
+
+    ## Add error bar here
+    geom_errorbar(aes(ymin=value-ci, ymax=value+ci),
+                  width=.4, position=pd, col="black", alpha = 0.7) +
+
+    # Add the points on top of the error bars
+    geom_point(position=pd, size=2.5,
+               col="black", fill="grey60",
+               show.legend = F, color="black", pch=21, alpha=0.9) +
+
+    #facet_wrap(~Phase, nrow=2)
+    # scale_fill_manual(values = c("black","#F20505","#F2CB05","#0FBF67")) +
+    # scale_color_manual(values=c("#F20505","#F5D736","#0FBF67")) +
+    theme(text = element_text(size = 20, colour = 'black'),
+          legend.position = "none") +
+
+    coord_flip()
+
+    # [as per reviewer request]
+    # forcing the y-axis to start at 0
+    # expand_limits(x = 0, y = 0)
+  
+```
+
+
+### 5.3 Betweenness centrality
+
+Next, we can look at betweenness centrality: 
+
+```{r}
+
+# network.complete <- graph_from_adjacency_matrix(adj_matrix,
+#                                               mode = "undirected",
+#                                               weighted = T)
+# 
+# V(network.complete) %>% length()
+# E(network.complete) %>% length()
+
+```
+
+***
+
+## Step 6: Pogo genes of interest
+
+### 6.1 Response to humidity
+
+- Read data from Friedman et al. 2020
+- Set correlation threshold | cor(collective behav, geneexpression) = [-0.6,0.5]
+  - we selected the top 5% as the positively correlated genes
+  - similarly, bottom 5% as the negetively
+  - Note, we tried using higher thresholds, but the results do not change vastly.
+
+```{r pogo_humidity}
+# Read 2020_Friedman_et_al data -------------------------------------------
+
+df.2020 <- read.csv(paste0(path_to_pogodata, "2020_friedman_Pbar_TPM_TraitCorr_dNdS.csv"), 
+                    header = T, stringsAsFactors = F, na.strings = c(""," ",".", "NA")) %>% as_tibble()
+
+# note, it is unclear what the columns actually mean, 
+# but, below find an example of what we could do.
+# Assumption: "humidity_cor" represents the correlation of gene expression to humidity changes
+
+## Keep relevant columns
+df.2020 <- 
+  df.2020 %>% 
+  select(pogo_gene = LOC,
+         humidity_cor:da_5ht_cor_colony_mean)
+
+## Deciding on the threshold
+## the first and the third quartiles
+
+# Set humidity-expression correlation threshold
+h.threshold <- quantile(df.2020$humidity_cor, prob=c(.05,.95), type=1)
+
+# obtain pogo genes that satisfied the threshold
+h.genes.pos <- 
+  df.2020 %>% 
+  as_tibble() %>% 
+  select(pogo_gene,
+         humidity_cor) %>% 
+  na.omit() %>% 
+  filter(humidity_cor > h.threshold[2]) %>% 
+  pull(pogo_gene)
+h.genes.neg <- 
+  df.2020 %>% 
+  as_tibble() %>% 
+  select(pogo_gene,
+         humidity_cor) %>% 
+  na.omit() %>% 
+  filter(humidity_cor < h.threshold[1]) %>% 
+  pull(pogo_gene)
+
+```
+
+> The top and bottom 5% gaves us a set of 516 positively and a set of 516 negatively correlated pogo genes.
+
+
+### 4.4 Re-Annotate the network
+
+> Now, let's see which modules, if any, in the cflo brain GCN do these genes reside?
+
+The names have the following meanings:
+
+- pogo-rH-pos = Pogonomyrmex genes whose expression show a positive correlation with collective response to abiotic changes
+- pogo-rH-neg = Pogonomyrmex genes whose expression show a negative correlation with collective response to abiotic changes
+
+> Modules vs. Rhythmic|BehavioralPlasticity genes
+
+```{r comparison_full_v2, fig.height=6, fig.width=14}
+writeLines("#####################################################
+How many genes are in each of my geneset of interest?
+#####################################################")
+
+## MAKE YOUR LIST OF GENES OF INTEREST ##
+
+# LIST ONE - WGCNA modules
+list1 <- module_genes
+writeLines("List of interesting genes #1
+----------------------------
+Genes in each of the identified gene-clusters or modules")
+sapply(list1, length)
+
+## LIST TWO - rhythmic genes
+list3 <- list(rhy24.ld,
+              rhy24.dd,
+              
+              rhy12.ld,
+              rhy12.dd,
+              
+              rhy08.ld,
+              rhy08.dd,
+              
+              h.genes.pos,
+              h.genes.neg
+              )
+writeLines("List of interesting genes #2
+----------------------------
+Rhythmic genes in control Cflo heads")
+names(list3) <- c("rhy24-Pbar-LD",
+                  "rhy24-Pbar-DD",
+                  
+                  "rhy12-Pbar-LD",
+                  "rhy12-Pbar-DD",
+                  
+                  "rhy08-Pbar-LD",
+                  "rhy08-Pbar-DD",
+                  
+                  "pogo-rH-pos", 
+                  "pogo-rH-neg"
+                  )
+sapply(list3, length)
+
+
+writeLines("Visualizing the significant overlaps between your lists of interesting genes and the identified modules")
+
+## CHECK FOR OVERLAP
+
+## make a GOM object
+gom.1v3 <- newGOM(list3, list1,
+       genome.size = nGenes)
+# png(paste0(path_to_repo, "/results/figures/",
+#            "02_pogo_GCN/",
+#            sample.name[1],"_gom_1v2.png"),
+#     width = 35, height = 15, units = "cm", res = 300)
+drawHeatmap(gom.1v3,
+              adj.p=T,
+              cutoff=0.05,
+              what="odds.ratio",
+              # what="Jaccard",
+              log.scale = T,
+              note.col = "orange")
+# trash <- dev.off()
+
+writeLines("How many genes exactly are overlapping between the pairwise comparisons")
+getMatrix(gom.1v3, name = "intersection") %>% t()
+
+```
+
+***
+
+## Step 7: Cflo genes of interest
+
+### 7.1 Behavioral plasticity
+
+- Read data from Das and de Bekker 2022
+- For a given set of Cflo genes of interest, find orthologs in Pbar
+- Check to see where the Cflo genes of interest are located in the Pbar GCN
+
+```{r cflo_gois_find_pogo_ortholog}
+pogo.for24 <- 
+        cflo.for24 %>%      # 3569 cflo genes with 24h rhythms in forager brains
+        cflo_to_pogo()      # 3265 cflo genes have a one-to-one pbar ortholog
+
+pogo.for24nur8 <-
+        cflo.for24nur8 %>%  # 291 cflo genes with 24h rhythms in forager brains, but 8h in nurses
+        cflo_to_pogo()      # 276 cflo genes have a one-to-one pbar ortholog
+
+```
+
+> The top and bottom 5% gaves us a set of 516 positively and a set of 516 negatively correlated pogo genes.
+
+
+### 4.4 Re-Annotate the network
+
+> Now, let's see which modules, if any, in the cflo brain GCN do these genes reside?
+
+The names have the following meanings:
+
+- pogo-rH-pos = Pogonomyrmex genes whose expression show a positive correlation with collective response to abiotic changes
+- pogo-rH-neg = Pogonomyrmex genes whose expression show a negative correlation with collective response to abiotic changes
+
+- for24-Cflo = P. barbatus orthologs of Cflo genes that show 24h rhythms in forager brains
+- for24nur8-Cflo = P. barbatus orthologs of Cflo genes that show 24h rhythms in forager brains, but 8h oscillations in nurse brains
+
+> Modules vs. Rhythmic|BehavioralPlasticity genes - V2
+
+```{r comparison_full_v3, fig.height=6, fig.width=14}
+writeLines("#####################################################
+How many genes are in each of my geneset of interest?
+#####################################################")
+
+## MAKE YOUR LIST OF GENES OF INTEREST ##
+
+# LIST ONE - WGCNA modules
+list1 <- module_genes
+writeLines("List of interesting genes #1
+----------------------------
+Genes in each of the identified gene-clusters or modules")
+sapply(list1, length)
+
+## LIST TWO - rhythmic genes
+list4 <- list(rhy24.ld,
+              rhy24.dd,
+              
+              h.genes.pos,
+              h.genes.neg,
+              
+              pogo.for24,
+              pogo.for24nur8
+              )
+writeLines("List of interesting genes #2
+----------------------------
+Rhythmic genes in control Cflo heads")
+names(list4) <- c("rhy24-Pbar-LD",
+                  "rhy24-Pbar-DD",
+                  
+                  "pogo-rH-pos", 
+                  "pogo-rH-neg",
+                  
+                  "for24-Cflo", 
+                  "for24nur8-Cflo"
+                  )
+sapply(list4, length)
+
+
+writeLines("Visualizing the significant overlaps between your lists of interesting genes and the identified modules")
+
+## CHECK FOR OVERLAP
+
+## make a GOM object
+gom.1v4 <- newGOM(list4, list1,
+       genome.size = nGenes)
+# png(paste0(path_to_repo, "/results/figures/",
+#            "02_pogo_GCN/",
+#            sample.name[1],"_gom_1v2.png"),
+#     width = 35, height = 15, units = "cm", res = 300)
+drawHeatmap(gom.1v4,
+              adj.p=T,
+              cutoff=0.05,
+              what="odds.ratio",
+              # what="Jaccard",
+              log.scale = T,
+              note.col = "orange")
+# trash <- dev.off()
+
+writeLines("How many genes exactly are overlapping between the pairwise comparisons")
+getMatrix(gom.1v4, name = "intersection") %>% t()
+
+writeLines("What are the corresponding Odds-ratio?")
+getMatrix(gom.1v4, name = "odds.ratio") %>% t() %>% round(2)
+
+writeLines("What are the corresponding p-values (Fisher's test)?")
+getMatrix(gom.1v4, name = "pval") %>% t() %>% round(2)
+
+```
+
+
+***
+
+## Plot temporal patterns
+
+```{r, fig.height=8, fig.width=5}
+h.genes.pos %>% 
+  stacked.zplot(bg.alpha = .08, alpha = 1) %>% 
+  multi.plot(rows = 2, cols = 1)
+
+h.genes.neg %>% 
+  stacked.zplot(bg.alpha = .08, alpha = 1) %>% 
+  multi.plot(rows = 2, cols = 1)
+```
+
+
+
+***
+
+## EXTRAS
+
+## Step 5: Export the results
+
+There are several things we could output from our analyses, we decided to report the following in the supplementary file:
+
+- cluster identity
+- total connectivity
+- pfam annotations enriched in the module
+
+### Get pfam enrichments for each module
+
+```{r module_enriched_pfams}
+# module_pfams <- list()
+# 
+# bg.genes <- dat[[1]] ## all genes used to make the network
+# which.test <- "pfams"
+# 
+# for (i in 1:length(which.labels)) {
+#   
+#   # get name of the module
+#   m <- which.labels[[i]]
+#   
+#   # save the enrichment results
+#   module_pfams[[i]] <- 
+#     module_genes[[m]] %>% 
+#     check_enrichment(.,
+#                      bg = dat[[1]],
+#                      what = which.test,
+#                      org = "cflo",
+#                      clean = T,
+#                      expand = T,
+#                      plot = F)
+# }
+# 
+# ## Now clean it up
+# sapply(module_pfams, nrow)
+# c <- 0
+# for (i in 1:length(module_pfams)) {
+#   
+#   if(is.null(nrow(module_pfams[[i]]))) {
+#     paste(which.labels[[i]],"is null") %>% print()
+#   } else if(nrow(module_pfams[[i]])==0) {
+#     paste(which.labels[[i]], "is an empty tibble") %>% print()
+#   } else {
+#     
+#     if(c==0) {
+#     c <- c+1
+#     module.pfams <- module_pfams[[i]]
+#     } else {
+#       module.pfams <- rbind(module.pfams, module_pfams[[i]])
+#     }
+#   }
+# }
+# 
+# ## change the name of the column
+# module.pfams <- 
+#   module.pfams %>% 
+#   select(gene_name, enriched_in_module=annot_desc) %>% 
+#   filter(enriched_in_module!="no_desc")
+# 
+# # check the output dataframe
+# module.pfams %>% head()
+
+```
+
+
+Let's make the file
+
+```{r export_results}
+# results.gcn <-
+#   pbar.ld.mods %>% 
+#   
+#   pull(gene_name) %>% 
+#   
+#   ## rhythmicity data
+#   TC7_annotator() %>% 
+#   select(gene_name, everything()) %>% 
+#   
+#   ## cluster identity
+#   left_join(pbar.ld.mods, by="gene_name") %>% 
+#   
+#   ## add total connectivity data
+#   left_join(Alldegrees1 %>% select(gene_name,kTotal), by="gene_name") %>% 
+#   
+#   ## add the enriched pfam
+#   left_join(module.pfams, by="gene_name") %>% 
+#   
+#   # Geneset: "for.brain.head.rhy24.cluster1" | DRGs (disease-associated)
+#   mutate(rhy_brain_head_cluster1 = ifelse(gene_name %in% for.brain.head.rhy24.cluster1, "yes", "no")) %>% 
+#   # Geneset: "for24.nur8" | DRGs (caste-associated)
+#   mutate(for24_nur8 = ifelse(gene_name %in% for24.nur8, "yes", "no")) %>% 
+#   
+#   ## Geneset: DEGs
+#   mutate(ocflo_UP = ifelse(gene_name %in% ocflo.up, "yes", "no")) %>% 
+#   mutate(ocflo_DOWN = ifelse(gene_name %in% ocflo.down, "yes", "no")) %>% 
+#   mutate(beau_UP = ifelse(gene_name %in% beau.up, "yes", "no")) %>% 
+#   mutate(beau_DOWN = ifelse(gene_name %in% beau.down, "yes", "no")) %>% 
+#   
+#   ## order the columns and rows
+#   select(module_identity, kTotal, enriched_in_module, 
+#          gene_name, gene_desc = blast_annotation, 
+#          rhy_brain_head_cluster1, for24_nur8,
+#          ocflo_UP, ocflo_DOWN, beau_UP, beau_DOWN,
+#          everything()) %>% 
+#   arrange(desc(module_identity), enriched_in_module, desc(kTotal)) 
+#   
+#   
+# # ## export it
+# # write.csv(results.gcn,
+# #           file = paste0(path_to_repo, "/results/00_supplementary_files/07_Cflo_forager_head_GCN_results.csv"),
+# #           row.names = F)
+
+```
+
+
+***
+
+
+***
+
+## RANDOMS
+
+### R1 Plotting the daily expression of core clock, clock modulators, and clock controlled genes
+
+```{r}
+# cgs.18 <- c("LOC105252466")
+# cgs.19 <- c("LOC105250191", "LOC105256631")
+# cgs.21 <- c("LOC105256454", "LOC105257275", "LOC105255207", "LOC105248529",
+#             "LOC105253861", "LOC105257836")
+# cgs.22 <- c("LOC105252510", "LOC105258655", "LOC105251553", "LOC105256952",
+#             "LOC105252917", "LOC105249574", "LOC105259208")
+# 
+# cgs <- list(cgs.18, cgs.19, cgs.21, cgs.22)
+# 
+# plots <- list()
+# for (i in 1:length(cgs)){
+#   
+# plots[[i]] <-
+#   cgs[[i]] %>% 
+#   stacked.zplot_tc7(bg.alpha = 0.4) %>% 
+#   multi.plot(rows = 1, cols = 3)
+# }
+# 
+# # png(paste0(path_to_repo, "/results/figures/", sample.name[1],"/",
+# #            "clock_genes_daily_exp.png"), 
+# #     width = 40, height = 20, units = "cm", res = 300)
+# # plots %>% 
+# #   multi.plot(rows = 1, cols = 4)
+# # dev.off()
+```

@@ -1,0 +1,503 @@
+---
+title: "Activity Data for TC7"
+author: Biplabendu Das
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: united
+    keep_md: no
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = F)
+knitr::opts_chunk$set(message = F)
+
+## For more inspiration on customizing the html output, refer to the following:
+# https://bookdown.org/yihui/rmarkdown/html-document.html#table-of-contents
+
+```
+
+
+# Housekeeping
+
+```{r libs}
+
+rm(list = ls())
+
+path_to_repo <- "/Users/biplabendudas/Documents/GitHub/Das_et_al_2022b"
+
+## load libraries
+pacman::p_load(tidyverse, ggplot2, lubridate, conflicted, WaveletComp)
+## load functions
+# customized theme for publication quality figures
+source(paste0(path_to_repo,"/functions/theme_publication.R"))
+
+
+## set conflict preference
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflict_prefer("union", "dplyr")
+
+## summary function
+summarySE <- function(data=NULL, measurevar, groupvars=NULL, na.rm=FALSE,
+                      conf.interval=.95, .drop=TRUE) {
+  
+  # New version of length which can handle NA's: if na.rm==T, don't count them
+  length2 <- function (x, na.rm=FALSE) {
+    if (na.rm) sum(!is.na(x))
+    else       length(x)
+  }
+  
+  # This does the summary. For each group's data frame, return a vector with
+  # N, mean, and sd
+  datac <- plyr::ddply(data, groupvars, .drop=.drop,
+                       .fun = function(xx, col) {
+                         c(N    = length2(xx[[col]], na.rm=na.rm),
+                           mean = mean   (xx[[col]], na.rm=na.rm),
+                           sd   = sd     (xx[[col]], na.rm=na.rm)
+                         )
+                       },
+                       measurevar
+  )
+  
+  # Rename the "mean" column    
+  datac <- plyr::rename(datac, c("mean" = measurevar))
+  
+  datac$se <- datac$sd / sqrt(datac$N)  # Calculate standard error of the mean
+  
+  # Confidence interval multiplier for standard error
+  # Calculate t-statistic for confidence interval: 
+  # e.g., if conf.interval is .95, use .975 (above/below), and use df=N-1
+  ciMult <- qt(conf.interval/2 + .5, datac$N-1)
+  datac$ci <- datac$se * ciMult
+  
+  # detach("package:plyr", unload=TRUE)
+  return(datac)
+}
+
+```
+
+# Global parameters
+
+```{r global_params}
+my.colors <- list()
+my.colors[[1]] <- c(rep("#5A829F",2), rep("black",2))
+my.colors[[2]] <- c(rep("#AD212F",2), rep("black",2))
+names(my.colors) <- c("beau.dat", "ophio.dat")
+
+days.of.interest <- list() 
+days.of.interest[[1]] <- c("Infection_day","Entrain-III","Sampling_day")
+days.of.interest[[2]] <- c("Infection_day","Entrain-II","Sampling_day")
+names(days.of.interest) <- names(my.colors)
+
+phases <- c("FA","FS")
+
+
+```
+
+
+# Experimental Run #1
+
+## Controls, Beau-inf
+
+> Left incu: controls, Right incu: Beau-infected ants
+
+### Step 1: Load data
+
+```{r load_data_1}
+beau.dat <- list()
+beau.dat[[1]] <- read.csv(paste0(path_to_repo,
+                            "/data/activity_data/beau/Right_incubator/right_incubator_activity_TC7.csv"),
+                     header = T, na.strings = c(" ","","NA"),
+                     stringsAsFactors = F) %>% as_tibble()
+beau.dat[[2]] <- read.csv(paste0(path_to_repo,
+                            "/data/activity_data/beau/Left_incubator/left_incubator_activity_TC7.csv"),
+                     header = T, na.strings = c(" ","","NA"),
+                     stringsAsFactors = F) %>% as_tibble()
+names(beau.dat) <- c("beau-infected", "controls")
+beau.dat %>% glimpse()  
+```
+
+
+> Summary of the dataset (beau-inf v. controls)
+
+```{r summary_beau}
+beau.dat[[1]] %>% 
+  filter(Phase %in% c("Infection_day", "Entrain-III", "Sampling_day")) %>% 
+  group_by(Day, Phase) %>% 
+  summarize(n_timepoints = n())
+
+```
+
+> The ants (beau-inf and naive controls) were sampled on Day 15 of the experiment; 3 days post infection. Below, we look at the colony extranidal activity of the controls v. beau-infected ants for the (two) days after infection and prior to sampling (Phase=="Entrain-III").
+
+
+### Step 2: Plot data
+
+```{r plot_1}
+
+exp.run <- 1 # which run (beau-infections (1) or ophio-infections (2))
+k <- 1 # which plots: 1(i=1,j=1), 2(i=1,j=2), 3(i=2,j=1), 4(i=2,j=2)
+
+color.ticker <- 1
+
+beau.plots <- list()
+
+for(i in 1:2) {
+  
+  for(j in 1:2) {
+    
+
+beau.plots[[k]] <- 
+  beau.dat[[i]] %>% 
+  select(Date:Phase,phases[[j]]) %>% 
+  
+  filter(Phase %in% days.of.interest[[1]]) %>% 
+  
+  ## ONLY KEEPING ENTRAIN-III DATA
+  filter(Phase %in% "Entrain-III") %>% 
+  
+  # mutate(date_time = lubridate::parse_date_time(date_time, " %m/%d/%y %I:%M:%S %p")) %>% 
+  # filter(date_time >= "2021-04-12" & date_time <= "2021-04-16") %>% 
+  
+  pivot_longer(cols = c(phases[[j]]), names_to = "location", values_to = "n_ants") %>% 
+  na.omit() %>% 
+  
+  mutate(location = factor(location)) %>%
+  mutate(Phase = factor(Phase, levels = days.of.interest[[1]])) %>% 
+  
+  
+  ggplot() +
+  
+  labs(x = "Time (ZT)",
+       y = "number of ants",
+       title = paste0(names(beau.dat)[[i]], ": ", phases[[j]])) +
+  
+  geom_rect(aes(xmin = 11.8, xmax = 23.8, ymin = -Inf, ymax = Inf),
+            fill = "lightgrey", alpha = 0.05, color=NA) +
+  
+  geom_line(aes(x=ZT, y=n_ants, col=Phase), size=1.5, alpha=0.7, 
+            color=my.colors[[exp.run]][color.ticker]) +
+  geom_point(aes(x=ZT, y=n_ants, col=Phase), size=2, alpha=0.7, 
+             color=my.colors[[exp.run]][color.ticker]) +
+  
+  facet_grid(factor(Day)~Phase, scales = "free") +
+  scale_y_continuous(limits = c(0,NA)) +
+  scale_x_continuous(breaks = c(2,12,24),
+                     limits = c(0,24)) +
+  
+  theme_Publication() +
+  
+  theme(panel.grid.major.x = element_line(colour = "#808080", size=0.1),
+        panel.grid.major.y = element_line(colour = "#808080", size=0.2))
+  
+  # update tickers
+  k <- k+1
+  color.ticker <- color.ticker+1
+
+  }
+}
+
+ggpubr::ggarrange(beau.plots[[1]],
+                  # beau.plots[[2]],
+                  beau.plots[[3]],
+                  # beau.plots[[4]],
+                  nrow=1, ncol = 2)
+
+
+```
+
+
+### Step 3: Wavelet analysis
+
+```{r wavelet_beau}
+
+my.wx <- list()
+
+## Let's plot the results side-by-side
+par(mfrow=c(1,2))
+
+for(i in 1:length(beau.dat)) {
+
+## structure the data for wavelet analysis
+  dat <-
+    beau.dat[[i]] %>% 
+    select(Date:Phase,FS,FA) %>%
+    
+    # filter(Phase %in% days.of.interest[[1]]) %>% 
+    
+    ## ONLY KEEPING ENTRAIN-III DATA
+    filter(Phase == "Entrain-III") %>%
+    
+    # mutate(date_time = lubridate::parse_date_time(date_time, " %m/%d/%y %I:%M:%S %p")) %>% 
+    # filter(date_time >= "2021-04-12" & date_time <= "2021-04-16") %>% 
+    
+    pivot_longer(cols = c(FA,FS), names_to = "location", values_to = "n_ants") %>% 
+    na.omit() %>% 
+      
+    arrange(Day, ZT, Phase) %>%
+  
+        ## Which days? FILTER, if necessary
+        # filter(Day %in% c("3","4","5")) %>% 
+        
+        # keep the columns that will be used and format correctly
+        select(Day,
+               Phase, ZT,
+               n_ants) %>% 
+        
+        # calculate zscore as activity
+        group_by(Day) %>%
+        mutate(activity = scale(n_ants)) %>% 
+  
+  
+    # omit the NAs (if any)
+    na.omit() 
+  
+  
+    # # how many data points do we have per ZT
+    # group_by(code, ZT) %>%
+    # summarise(datapoints = n()) 
+  
+  ## run the analysis
+  my.wx[[i]] <- analyze.wavelet(dat, "activity", loess.span = 0,
+                           method = "white.noise",
+                           dt = 2, dj = 1/20,
+                           lowerPeriod = 1, upperPeriod = 32,
+                           make.pval = TRUE, n.sim = 1000,
+                           verbose = F)
+
+  
+  ## plot the results
+  
+  ## What is (are) the dominant periodicity?
+  # plot type 1
+  wt.avg(my.wx[[i]],
+         # maximum.level = maximum.level,
+         spec.period.axis = list(at = c(1,2,4,8,12,24,32), las=1),
+         periodtck = 1, periodtcl = NULL,
+         lwd = 4,
+         sigcex = c(1,1), exponent = 1,
+         show.legend = F,
+         # legend.coords = "bottom",
+         main = paste0(names(beau.dat)[i]))
+  # plot type 2
+  wt.image(my.wx[[i]], color.key = "i", n.levels = 250,
+           spec.period.axis = list(at = c(1,2,4,8,12,24,32), las=1),
+            main = paste0(names(beau.dat)[i]))
+  
+
+}
+
+par(mfrow=c(1,1))
+```
+
+
+
+# Experimental Run #2
+
+## Controls, Ophio-inf
+
+> Left incu: controls (no sampling), Right incu: Ophio-infected ants
+
+### Step 1: Load data
+
+```{r load_data_2}
+ophio.dat <- list()
+ophio.dat[[1]] <- read.csv(paste0(path_to_repo,                                "/data/activity_data/ophio/Right_incubator/right_incubator_activity_TC7_ophio.csv"),
+                     header = T, na.strings = c(" ","","NA"),
+                     stringsAsFactors = F) %>% as_tibble()
+ophio.dat[[2]] <- read.csv(paste0(path_to_repo,                                 "/data/activity_data/ophio/Left_incubator/left_incubator_activity_TC7_control.csv"),
+                     header = T, na.strings = c(" ","","NA"),
+                     stringsAsFactors = F) %>% as_tibble()
+names(ophio.dat) <- c("ophio-infected", "controls")
+ophio.dat %>% glimpse()  
+```
+
+
+
+> Summary of the dataset (beau-inf v. controls)
+
+```{r summary_ophio}
+ophio.dat[[1]] %>% 
+  filter(Phase %in% c("Infection_day", "Entrain-II", "Sampling_day")) %>% 
+  group_by(Day, Phase) %>% 
+  summarize(n_timepoints = n())
+
+```
+
+> The ants (ophio-inf) were sampled on Day 18 of the experiment; 10 days post infection. Below, we look at the colony extranidal activity of the controls v. beau-infected ants for all days after infection and prior to sampling (Phase=="Entrain-II").
+
+
+
+### Step 2: Plot data
+
+
+```{r plot_2}
+
+exp.run <- 2 # which run (beau-infections (1) or ophio-infections (2))
+k <- 1 # which plots: 1(i=1,j=1), 2(i=1,j=2), 3(i=2,j=1), 4(i=2,j=2)
+
+color.ticker <- 1
+
+ophio.plots <- list()
+
+for(i in 1:2) {
+  
+  for(j in 1:2) {
+    
+
+ophio.plots[[k]] <- 
+  ophio.dat[[i]] %>% 
+  select(Date:Phase,phases[[j]]) %>% 
+  
+  filter(Phase %in% days.of.interest[[2]]) %>% 
+  
+  ## ONLY KEEPING ENTRAIN-II DATA
+  filter(Phase %in% days.of.interest[[2]][[2]]) %>% 
+  
+  
+  # mutate(date_time = lubridate::parse_date_time(date_time, " %m/%d/%y %I:%M:%S %p")) %>% 
+  # filter(date_time >= "2021-04-12" & date_time <= "2021-04-16") %>% 
+  
+  pivot_longer(cols = c(phases[[j]]), names_to = "location", values_to = "n_ants") %>% 
+  na.omit() %>% 
+  
+  mutate(location = factor(location)) %>%
+  mutate(Phase = factor(Phase, levels = days.of.interest[[2]])) %>% 
+  
+  ## KEEP DAYS IN CHECK HERE
+  # filter(Day %in% c(8:12)) %>%
+  filter(Phase == "Entrain-II") %>%
+  
+  
+  ggplot() +
+  
+  labs(x = "Time (ZT)",
+       y = "number of ants",
+       title = paste0(names(ophio.dat)[[i]], ": ", phases[[j]])) +
+  
+  geom_rect(aes(xmin = 11.8, xmax = 23.8, ymin = -Inf, ymax = Inf),
+            fill = "lightgrey", alpha = 0.05, color=NA) +
+  
+  geom_line(aes(x=ZT, y=n_ants, col=Phase), size=1.5, alpha=0.7, 
+            color=my.colors[[exp.run]][color.ticker]) +
+  geom_point(aes(x=ZT, y=n_ants, col=Phase), size=2, alpha=0.7, 
+             color=my.colors[[exp.run]][color.ticker]) +
+  
+  facet_grid(factor(Day)~Phase, scales = "free") +
+  scale_y_continuous(limits = c(0,NA)) +
+  scale_x_continuous(breaks = c(2,12,24),
+                     limits = c(0,24)) +
+  
+  theme_Publication() +
+  
+  theme(panel.grid.major.x = element_line(colour = "#808080", size=0.1),
+        panel.grid.major.y = element_line(colour = "#808080", size=0.2))
+  
+  # update tickers
+  k <- k+1
+  color.ticker <- color.ticker+1
+
+  }
+}
+
+ggpubr::ggarrange(ophio.plots[[1]],
+                  # ophio.plots[[2]],
+                  ophio.plots[[3]],
+                  # ophio.plots[[4]],
+                  ncol=2)
+
+```
+
+
+
+### Step 3: Wavelet analysis
+
+```{r wavelet_ocflo}
+
+my.wx <- list()
+
+## Let's plot the results side-by-side
+par(mfrow=c(1,2))
+
+for(i in 1:length(beau.dat)) {
+
+## structure the data for wavelet analysis
+  dat <-
+    ophio.dat[[i]] %>% 
+    select(Date:Phase,FS,FA) %>%
+    
+    # filter(Phase %in% days.of.interest[[1]]) %>% 
+    
+    ## ONLY KEEPING ENTRAIN-II DATA
+    filter(Phase == "Entrain-II") %>%
+    
+    # mutate(date_time = lubridate::parse_date_time(date_time, " %m/%d/%y %I:%M:%S %p")) %>% 
+    # filter(date_time >= "2021-04-12" & date_time <= "2021-04-16") %>% 
+    
+    pivot_longer(cols = c(FA,FS), names_to = "location", values_to = "n_ants") %>% 
+    na.omit() %>% 
+      
+    arrange(Day, ZT, Phase) %>%
+  
+        ## Which days? FILTER, if necessary
+        # filter(Day %in% c("3","4","5")) %>% 
+        
+        # keep the columns that will be used and format correctly
+        select(Day,
+               Phase, ZT,
+               n_ants) %>% 
+        
+        # calculate zscore as activity
+        group_by(Day) %>%
+        mutate(activity = scale(n_ants)) %>% 
+  
+  
+    # omit the NAs (if any)
+    na.omit() 
+  
+  
+    # # how many data points do we have per ZT
+    # group_by(code, ZT) %>%
+    # summarise(datapoints = n()) 
+  
+  ## run the analysis
+  my.wx[[i]] <- analyze.wavelet(dat, "activity", loess.span = 0,
+                           method = "white.noise",
+                           dt = 2, dj = 1/20,
+                           lowerPeriod = 1, upperPeriod = 32,
+                           make.pval = TRUE, n.sim = 1000,
+                           verbose = F)
+
+  
+  ## plot the results
+  
+  ## What is (are) the dominant periodicity?
+  # plot type 1
+  wt.avg(my.wx[[i]],
+         # maximum.level = maximum.level,
+         spec.period.axis = list(at = c(1,2,4,8,12,24,32), las=1),
+         periodtck = 1, periodtcl = NULL,
+         lwd = 4,
+         sigcex = c(1,1), exponent = 1,
+         show.legend = F,
+         # legend.coords = "bottom",
+         main = paste0(names(ophio.dat)[i]))
+  # plot type 2
+  wt.image(my.wx[[i]], color.key = "i", n.levels = 250,
+           spec.period.axis = list(at = c(1,2,4,8,12,24,32), las=1),
+            main = paste0(names(ophio.dat)[i]))
+  
+
+}
+
+par(mfrow=c(1,1))
+```
+

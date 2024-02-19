@@ -1,0 +1,437 @@
+---
+title: "Compare Cflo GCNs: Control v. Beau-inf"
+author: Biplabendu Das
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: united
+    keep_md: no
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = F)
+knitr::opts_chunk$set(message = F)
+
+## For more inspiration on customizing the html output, refer to the following:
+# https://bookdown.org/yihui/rmarkdown/html-document.html#table-of-contents
+
+```
+
+```{r housekeeping, include=FALSE}
+set.seed(420)
+rm(list = ls())
+
+# Load the libraries
+pacman::p_load(pheatmap, dendextend, tidyverse, viridis)
+pacman::p_load(RSQLite, tidyverse, dbplyr, DT, conflicted, WGCNA, igraph)
+pacman::p_load(patchwork)
+
+# set conflict preference
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflict_prefer("layout", "plotly")
+conflict_prefer("hclust", "flashClust")
+conflict_prefer("simplify", "igraph")
+
+# set path to your working directory
+path_to_repo = "/Users/biplabendudas/Documents/GitHub/Das_et_al_2022b"
+
+# script name
+script.name = "03_compare_circadianGCN_control_beau"
+
+# load functions
+# customized theme for publication quality figures
+source(paste0(path_to_repo,"/functions/theme_publication.R"))
+# function to perform enrichment analysis
+source(paste0(path_to_repo,"/functions/enrichment_analysis.R"))
+# function to plot z-scores (Cflo genes only)
+source(paste0(path_to_repo,"/functions/plot_zscores.R"))
+
+```
+
+## Overview/Goals
+
+Compare the gene co-expression networks of healthy Cflo heads to that of ophio-infected and beauveria-infected individuals.
+
+- identify the modules that are highly conserved
+- identify the modules that show no evidence for preservation
+
+## Step 1: Identify the genes for running module preservation
+
+> NOT APPLICABLE.
+
+### 1.1 Load data
+
+Goal: Load the expression (FPKM) data for Cflo (control, ophio-infected, beau-infected)
+
+- 
+
+```{r load_data_v2}
+
+# loading database which contains data for Das and de Bekker 2022, from GitHub
+db <- dbConnect(RSQLite::SQLite(),
+                paste0(path_to_repo,"/data/databases/TC7_data.db"))
+
+# specify sample name
+sample.name <- c("cflo_control","cflo_ophio-infected","cflo_beau-infected")
+
+# Control - Expressed
+#
+# extract the (gene-expr X time-point) data
+control.dat <-
+  db %>%
+  tbl(., paste0(sample.name[1] ,"_fpkm")) %>%
+  select(gene_name, everything()) %>%
+  collect()
+# count the number of time points that has ≥ 1 FPKM
+n.expressed <- apply(control.dat[-1], 1, function(x) sum(x >= 1))
+# subset the data and only keep the filtered genes
+control.dat <- control.dat[which(n.expressed >=6),] # 9591 genes
+
+# ophio - Expressed + Subset
+#
+# extract the (gene-expr X time-point) data
+ophio.dat <-
+  db %>%
+  tbl(., paste0(sample.name[2] ,"_fpkm")) %>%
+  select(gene_name, everything()) %>%
+  collect()
+#
+# count the number of time points that has ≥ 1 FPKM
+n.expressed <- apply(ophio.dat[-1], 1, function(x) sum(x >= 1))
+# subset the data and only keep the filtered genes
+ophio.dat <- ophio.dat[which(n.expressed >=6),] # 9671 genes
+
+# beau - Expressed + Subset
+#
+# extract the (gene-expr X time-point) data
+beau.dat <-
+  db %>%
+  tbl(., paste0(sample.name[3] ,"_fpkm")) %>%
+  select(gene_name, everything()) %>%
+  collect()
+#
+# count the number of time points that has ≥ 1 FPKM
+n.expressed <- apply(beau.dat[-1], 1, function(x) sum(x >= 1))
+# subset the data and only keep the filtered genes
+beau.dat <- beau.dat[which(n.expressed >=6),] # 9493 genes
+
+
+
+# Which genes are commonly expressed in Cflo heads in all three conditions?
+cflo.genes <- intersect(intersect(control.dat$gene_name, ophio.dat$gene_name), beau.dat$gene_name)
+# n = 9405 genes
+
+# Subset the dataframes to keep only these 9405 genes (cflo.genes)
+#
+# ophio-control
+control.dat <- 
+  control.dat %>% 
+  filter(gene_name %in% cflo.genes)
+# ophio-infection
+ophio.dat <- 
+  ophio.dat %>% 
+  filter(gene_name %in% cflo.genes)
+# beau-infection
+beau.dat <- 
+  beau.dat %>% 
+  filter(gene_name %in% cflo.genes)
+```
+
+> Note, the program will throw an error if there is a mismatch between the lengths of the two datasets.
+
+### 1.2 Format the data
+
+```{r format_data}
+
+# We work with two sets:
+nSets = 2;
+# For easier labeling of plots, create a vector holding descriptive names of the two sets.
+setLabels = c("cflo-control", "cflo-beau-infected")
+shortLabels = c("control", "beau-inf")
+
+# Form multi-set expression data: columns starting from 9 contain actual expression data.
+multiExpr = vector(mode = "list", length = nSets)
+
+multiExpr[[1]] = list(data = as.data.frame(t(log2(control.dat[-c(1)]+1))));
+names(multiExpr[[1]]$data) = control.dat$gene_name;
+rownames(multiExpr[[1]]$data) = names(control.dat)[-c(1)];
+multiExpr[[2]] = list(data = as.data.frame(t(log2(beau.dat[-c(1)]+1))));
+names(multiExpr[[2]]$data) = beau.dat$gene_name;
+rownames(multiExpr[[2]]$data) = names(beau.dat)[-c(1)];
+# Check that the data has the correct format for many functions operating on multiple sets:
+exprSize = checkSets(multiExpr)
+
+# Check that all genes and samples have sufficiently low numbers of missing values.
+gsg = goodSamplesGenesMS(multiExpr, verbose = 3);
+writeLines("All samples okay?")
+gsg$allOK
+
+# Use the following code to check the data
+# multiExpr[[1]]$data[,1:3]
+
+```
+
+
+### 1.3 Check samples
+
+```{r check_samples}
+# We now cluster the samples on their Euclidean distance, separately in each set.
+
+sampleTrees = list()
+for (set in 1:nSets) {
+  sampleTrees[[set]] = hclust(dist(multiExpr[[set]]$data), method = "average")
+}
+
+
+# png(file = paste0(path_to_repo,"/results/temp_files/Plots/TC6_SampleClustering.png"), 
+#     width = 20, height = 30, units = "cm", res = 300)
+par(mfrow=c(1,2))
+# par(mar = c(0, 4, 2, 0))
+for (set in 1:nSets)
+  plot(sampleTrees[[set]], main = paste("Sample clustering in", setLabels[set]),
+       xlab="", sub="", cex = 0.7)
+# dev.off()
+
+# Define data set dimensions
+nGenes = exprSize$nGenes
+nSamples = exprSize$nSamples
+
+# save(multiExpr, 
+#      # Traits, 
+#      nGenes, nSamples, setLabels, shortLabels, exprSize,
+#      file = "TC6_Consensus-dataInput.RData")
+
+
+```
+
+### 1.4 Module preservation
+
+#### Prep data
+
+- Load/Prep the expression data for control and Okim
+- Load/Prep the module identity for each control gene
+- Run the modulePreservation function & save the result
+
+```{r prep_data}
+# Expression data
+multiExpr_1 = list(control = list(data = multiExpr[[1]]$data), 
+                   beau = list(data = multiExpr[[2]]$data));
+
+# module identity for Cflo-control gene
+## specify the location of the csv that has this info.
+file_loc <- "/results/WGCNA/cflo/cflo_heads_control_module_identity_new_labels.csv"
+
+## load it into R
+mod.identity.all <- read.csv(paste0(path_to_repo,file_loc), stringsAsFactors = F) 
+writeLines("there are 9591 genes in the original network that were classified into 22 modules")
+
+## filter to keep only the genes that we are working with
+which.genes <- cflo.genes
+mod.identity <-
+  mod.identity.all %>% 
+  filter(gene_name %in% which.genes) %>% 
+  select(gene_name, 
+         module_identity=old_labels) %>%
+  # !!this step is necessary!! #
+  arrange(gene_name)  
+  
+  
+## specify the module identity of the genes
+moduleColors <- mod.identity %>% pull(module_identity)
+multiColor = list(control = moduleColors);
+
+
+```
+
+#### Run modulePreservation
+
+```{r}
+# # Run module preservation function
+# mp = modulePreservation(multiExpr_1, multiColor,
+#                           referenceNetworks = 1,
+#                           nPermutations = 200,
+#                           calculateQvalue = TRUE,
+#                           randomSeed = 1,
+#                           quickCor = 0,
+#                           verbose = 3)
+# 
+# 
+# save(mp, file = paste0(path_to_repo,
+#                       "/results/module_preservation/cflo/modulePreservation_Cflo_control_v_beau_inf.RData"))
+
+## or load the results for faster access
+load(file = paste0(path_to_repo,
+                   "/results/module_preservation/cflo/modulePreservation_Cflo_control_v_beau_inf.RData"));
+
+```
+
+
+#### Plot results
+
+```{r }
+ref = 1
+test = 2
+statsObs = cbind(mp$quality$observed[[ref]][[test]], mp$preservation$observed[[ref]][[test]])
+statsZ = cbind(mp$quality$Z[[ref]][[test]][,-1], mp$preservation$Z[[ref]][[test]][,-1]);
+
+# Compare preservation to quality:
+z.stats <- cbind(statsObs[, c("moduleSize", "medianRank.pres", "medianRank.qual")],
+             signif(statsZ[, c("Zsummary.pres", "Zsummary.qual")], 2)) 
+z.stats <-
+  z.stats %>%
+  rownames_to_column("old_labels") %>% 
+    left_join(unique(mod.identity.all[-1]), by="old_labels") %>%
+    select(-1) %>% 
+    select(module_name = module_identity,
+           module_size = moduleSize,
+           everything())
+
+
+mains = c("Preservation Median rank", "Preservation Zsummary")
+pd <- position_dodge(0.5)
+
+z.stats %>%
+  mutate(module_name = factor(module_name, levels = unique(mod.identity.all$module_identity))) %>%
+  na.omit() %>% 
+  
+  # ## PRESERVATION MEDIAN RANK
+  # ggplot(aes(x=log10(module_size), y=medianRank.pres)) +
+  
+  ## PRESERVATION Z-SUMMARY
+  ggplot(aes(x=log10(module_size), y=Zsummary.pres)) +
+  geom_hline(yintercept = c(2,10), col="darkred", alpha=0.5) +
+  
+  geom_point(alpha=0.5, size=15, col="lightgrey", position = pd) +
+  geom_text(aes(label=module_name), check_overlap = T) +
+  
+  theme_Publication() +
+  scale_colour_Publication() +
+  
+  scale_x_continuous(limits = c(0,max(log10(1000))+0.5),
+                     breaks = c(0,1,2,3),
+                     labels = c("0","10","100","1000")) +
+  
+  xlab("module size (genes)") +
+  ylab(mains[2]) +
+  ggtitle("")
+
+```
+
+NOTES:
+
+- Looking into the WGCNA [tutorial](https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/ModulePreservation/Tutorials/HumanChimp.pdf), it seems that the gold module contains a random sample of 1000 genes, "The “gold” module consists of 1000 randomly selected genes that represent a sample of the whole network".
+
+
+-------------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------------
+
+## Step 3: Annotate GCN
+
+### DEGs
+
+```{r}
+
+# # Load the DEGs
+# all.DEGs <- readRDS(paste0(path_to_repo,"/results/cflo/","cflo_inf_v_control_DEGs.Rds"))
+# 
+# ## NOTE: all.DEGs[[1]] contains the DEG results for Cflo_Ophio-inf v. Cflo_control
+# 
+# ## How many DEGs - 5% FDR and ≥ 1 fold change in gene expression
+# all.DEGs[[2]] %>% 
+#   # filter(adj.P.Val < q.threshold) %>%
+#   # filter(abs(logFC) >= 2) %>% # change the criteria here for top DEG or all DEG (logFC≥1)
+#   filter(sig == "yes") %>%
+#   # pull(gene_name) %>% 
+#   # exp.plot(log = T) %>% 
+#   # pluck(1) %>% 
+#   # multi.plot(rows = 5, cols = 5)
+#   # the foraging gene
+#   # filter(geneId == "LOC105255628") # is not sig DE
+#   group_by(inf_v_control) %>% 
+#   summarise(n_genes = n())
+#     ## n = 81 up- and 141 down-regulated genes in Cflo heads during Ophio-infection 
+#     ## (at 5% FDR; log2-fold-change ≥ 1) 
+```
+
+
+#### Where are my DEGs located?
+
+```{r find_genes_in_network_1}
+# pacman::p_load(GeneOverlap)
+# # https://www.bioconductor.org/packages/devel/bioc/vignettes/GeneOverlap/inst/doc/GeneOverlap.pdf
+# 
+# # writeLines("#####################################################
+# # How many genes are in each of my geneset of interest?
+# # #####################################################")
+# 
+# ## MAKE YOUR LIST OF GENES OF INTEREST ##
+# 
+# # LIST ONE - WGCNA modules for control Cflo heads
+# module.dat <- mod.identity.all
+# 
+# module_genes <- list()
+# module_color <- module.dat %>% pull(module_identity) %>% as.character() %>% unique()
+# # Get the genes from each of the modules
+# for (i in 1:length(module_color)) {
+# 
+#   module_genes[[i]] <- module.dat %>% filter(module_identity == module_color[i]) %>% pull(gene_name)
+#   names(module_genes)[[i]] <- module_color[i]
+# }
+# 
+# # # save this list for performing subsequent analyses
+# # saveRDS(module_genes, file = paste0(path_to_repo, "/results/WGCNA/cflo/control_GCN_modules_genes.Rds"))
+# 
+# writeLines("List of interesting genes #1
+# ----------------------------
+# Genes in each of the identified gene-clusters or modules")
+# list1 <- module_genes
+# sapply(list1, length)
+# 
+# 
+# ## LIST TWO - DEGs (ophio v. control)
+# beau.up <- all.DEGs[[2]] %>% filter(inf_v_control == "up") %>% pull(gene_name)
+# beau.down <- all.DEGs[[2]] %>% filter(inf_v_control == "down") %>% pull(gene_name)
+# 
+# writeLines("List of interesting genes #2
+# ----------------------------
+# DEGs in ophio-inf Cflo heads")
+# list2 <- list(beau.up, beau.down)
+# names(list2) <- paste0("beau-inf_", c("UP","DOWN"))
+# sapply(list2, length)
+# 
+# # Define the number of genes in the background
+# nGenes <- module.dat %>% nrow()
+# 
+# ## CHECK FOR OVERLAP
+# 
+# ## make a GOM object
+# gom.1v2 <- newGOM(list1, list2,
+#        genome.size = nGenes)
+# png(paste0(path_to_repo, "/results/figures/", sample.name[3],"_v_", sample.name[1],"_gom_1v2.png"),
+#     width = 15, height = 30, units = "cm", res = 300)
+# drawHeatmap(gom.1v2,
+#               adj.p=T,
+#               cutoff=0.001,
+#               what="odds.ratio",
+#               # what="Jaccard",
+#               log.scale = T,
+#               note.col = "grey80")
+# trash <- dev.off()
+# 
+# writeLines("Visualizing the significant overlaps between your lists of interesting genes and the identified modules")
+
+
+```
+
+```{r plot_gom_1v2, echo = FALSE, fig.align='center', fig.cap='Gene-clusters with DEGs (Ophio-V-Control-Cflo)', out.width="65%"}
+# knitr::include_graphics(paste0(path_to_repo, "/results/figures/", sample.name[3],"_v_", sample.name[1],"_gom_1v2.png"))
+```

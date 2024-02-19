@@ -7,8 +7,10 @@
 **/.Rdata
 *.Rdata
 ## all scripts but "for_submission"
-/scripts
-!/scripts/02_R_scripts/*
+#/scripts/*
+#!/scripts/02_R_scripts/*
+scripts/*
+!scripts/02_R_scripts
 
 # History files
 .Rhistory

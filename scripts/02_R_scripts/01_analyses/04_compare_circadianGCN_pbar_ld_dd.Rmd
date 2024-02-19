@@ -1,0 +1,572 @@
+---
+title: "Compare GCNs: Cflo DD v. LD (ref)"
+author: Biplabendu Das
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: united
+    keep_md: no
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = F)
+knitr::opts_chunk$set(message = F)
+
+## For more inspiration on customizing the html output, refer to the following:
+# https://bookdown.org/yihui/rmarkdown/html-document.html#table-of-contents
+
+```
+
+
+```{r housekeeping, include=FALSE}
+set.seed(420)
+rm(list = ls())
+
+#' Load the libraries
+pacman::p_load(pheatmap, dendextend, tidyverse, viridis)
+pacman::p_load(RSQLite, tidyverse, dbplyr, DT, conflicted, igraph)
+library(WGCNA)
+pacman::p_load(patchwork)
+pacman::p_load(GeneOverlap)
+library(timecourseRnaseq)
+
+#' set conflict preference
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflict_prefer("union", "dplyr")
+conflict_prefer("layout", "plotly")
+conflict_prefer("hclust", "flashClust")
+
+## set path to your working directory
+path_to_repo = "~/Documents/05_postdoc/Deborah_Gordon/04_research/2022/04_timecourse_RNASeq"
+
+## set path to the figures
+path_to_figures = paste0(path_to_repo, "/results/figures/02_pogo_GCN/")
+
+## load functions
+# customized theme for publication quality figures
+source(paste0(path_to_repo,"/functions/theme_publication.R"))
+# customized functions for plotting 
+source(paste0(path_to_repo, "/functions/plot_zscores.R"))
+
+
+## Fisher's exact test
+fishers_overlap <- function(set.1, set.2, bg.genes=13808) {
+  set.1 <- as.character(set.1) # expressed in control heads
+  set.2 <- as.character(set.2) # expressed in ophio-inf or beau-inf heads
+  
+  tot.genes <- as.numeric(bg.genes) # all genes in the Cflo genome
+  
+  # To create the contingency table for module-7 (set-1) and for.rhy (set-2), we will need the following information:
+  # genes that are in both sets
+  overlapping.genes <- intersect(set.1, set.2) %>% length()
+  # genes in set-1 but not in set-2
+  set.1.not.set.2 <- setdiff(set.1, set.2) %>% length()
+  # genes in set-2 but not in set-1
+  set.2.not.set.1 <- setdiff(set.2, set.1) %>% length()
+  # background genes not in set-1 or set-2
+  not.set.1.set.2 <- tot.genes - (union(set.1, set.2) %>% unique() %>% length())
+  
+  # Contingency table for set.1 and set.2
+  test.table <- 
+    data.frame(
+      in.set.2 = c(overlapping.genes, set.2.not.set.1),
+      not.set.2 = c(set.1.not.set.2, not.set.1.set.2)
+    )
+  rownames(test.table) <- c("in.set.1", "not.set.1")
+  
+  writeLines(paste0("Contingency table:\n"))
+  # take a look at the contingency table
+  test.table %>% print()
+  
+  writeLines(paste0("Running fisher.test() on contingency table:\n"))
+  # fisher test
+  fisher.test(test.table) %>% print()
+}
+```
+
+> Loading one-to-one orthologs between P. barbatus and C. floridanus
+
+```{r load_pbar_cflo_orthologs}
+path_to_pogodata <- paste0(path_to_repo,"/data/gordon_data/")
+pogo.cflo <-
+  read.csv(paste0(path_to_pogodata, "pogo_cflo_orthologs.csv"),
+           header = T, stringsAsFactors = F, na.strings = c(""," ",".", "NA")) %>%
+  as_tibble() %>% 
+  select(cflo_gene,pogo_gene) %>% 
+  distinct()
+
+# make a function that takes pogo names and returns cflo names
+pogo_to_cflo <- function(geneset) {
+  cflo_genes <- 
+    pogo.cflo %>% 
+    filter(pogo_gene %in% geneset) %>% 
+    pull(cflo_gene) %>% 
+    unique() %>% 
+    as.character()
+  
+  return(cflo_genes)
+}
+
+# make a function that takes pogo names and returns cflo names
+cflo_to_pogo <- function(geneset) {
+  pogo_genes <- 
+    pogo.cflo %>% 
+    filter(cflo_gene %in% geneset) %>% 
+    pull(pogo_gene) %>% 
+    unique() %>% 
+    as.character()
+  
+  return(pogo_genes)
+}
+
+```
+
+
+## Overview/Goals
+
+Compare the gene co-expression networks of Cflo forager brains to that of Pbar foragers.
+
+- identify the modules that are highly conserved
+- identify the modules that show no evidence for preservation
+
+## Step 1: Identify the genes for running module preservation
+
+### 1.1 Load data
+
+> Specify the order of the samples
+
+```{r sample_names_order}
+# SAMPLE NAME
+## specify sample name
+sample.name <- c("pbar_ld","pbar_dd","annot")
+
+```
+
+
+> Load the expression (FPKM) data
+
+- Cflo forager ant brains - LD  (Das and de Bekker 2022)
+
+```{r load_cflo_data}
+# Specify the path to TC5 database
+path_to_tc5_repo = "~/Documents/GitHub/Das_et_al_2021"
+# Load the TC5 database
+tc5.db <- dbConnect(RSQLite::SQLite(), paste0(path_to_tc5_repo,"/data/TC5_data.db"))
+```
+
+- Pogo forager ant brains - LD 
+- Pogo forager ant brains - DD
+
+```{r load_data}
+
+# LOAD Pbar DATABASES (TC9)
+## 1. TC9_data.db
+db <- dbConnect(RSQLite::SQLite(),
+                     paste0(path_to_repo, "/data/databases/TC9_data.db"))
+```
+
+> loading data...
+
+```{r load_data_v2}
+
+# Pbar - LD
+#
+# extract the (gene-expr X time-point) data
+pbar.dat <-
+  db %>%
+  tbl(., paste0(sample.name[1] ,"_fpkm")) %>%
+  select(gene_name, everything()) %>%
+  collect()
+# count the number of time points that has ≥ 1 FPKM
+n.expressed <- apply(pbar.dat[-1], 1, function(x) sum(x >= 1))
+# subset the data and only keep the filtered genes
+pbar.dat <- pbar.dat[which(n.expressed >=6),] # 9925 genes
+
+# Pbar - DD
+#
+# extract the (gene-expr X time-point) data
+pbar.dat.dd <-
+  db %>%
+  tbl(., paste0(sample.name[2] ,"_fpkm")) %>%
+  select(gene_name, everything()) %>%
+  collect()
+#
+# count the number of time points that has ≥ 1 FPKM
+n.expressed <- apply(pbar.dat.dd[-1], 1, function(x) sum(x >= 1))
+# subset the data and only keep the filtered genes
+pbar.dat.dd <- pbar.dat.dd[which(n.expressed >=6),] # 9827 genes
+
+# Cflo - foragers - LD
+#
+# extract the (gene-expr X time-point) data
+cflo.dat <-
+  tc5.db %>%
+  tbl(., paste0(sample.name[3] ,"_fpkm")) %>%
+  select(gene_name, X2F:X24F) %>%
+  collect()
+#
+# count the number of time points that has ≥ 1 FPKM
+n.expressed <- apply(cflo.dat[-1], 1, function(x) sum(x >= 1))
+# subset the data and only keep the filtered genes
+cflo.dat <- cflo.dat[which(n.expressed >=6),] # 9239 genes
+# CONVERT Cflo gene names to Pbar genes
+#
+# 8120 of the 9239 has an ortholog; 7982 are unique
+#
+cflo.dat <-
+  cflo.dat %>% 
+  left_join(pogo.cflo, by=c("gene_name"="cflo_gene")) %>% 
+  filter(!is.na(pogo_gene)) %>%
+  select(-gene_name) %>% 
+  select(gene_name = pogo_gene, everything()) %>%
+  # summarize the expression levels of genes with duplicate expression
+  pivot_longer(cols = X2F:X24F) %>% 
+  group_by(gene_name, name) %>% 
+  summarize(value=mean(value, na.rm = T)) %>% 
+  ungroup() %>% 
+  pivot_wider()
+
+
+# Which genes are commonly expressed?
+common.genes <- intersect(intersect(pbar.dat$gene_name, 
+                                    pbar.dat.dd$gene_name), 
+                          cflo.dat$gene_name)
+# n = 7675 genes
+
+
+
+
+# Subset the dataframes to keep only these 9405 genes (common.genes)
+#
+pbar.dat <- 
+  pbar.dat %>% 
+  filter(gene_name %in% common.genes)
+#
+pbar.dat.dd <- 
+  pbar.dat.dd %>% 
+  filter(gene_name %in% common.genes)
+#
+cflo.dat <- 
+  cflo.dat %>% 
+  filter(gene_name %in% common.genes)
+```
+
+> Note, the program will throw an error if there is a mismatch between the lengths of the two datasets.
+
+### 1.2 Format the data
+
+```{r format_data}
+# We work with two sets:
+nSets = 2;
+# For easier labeling of plots, create a vector holding descriptive names of the two sets.
+setLabels = c("Pbar-LD", "Pbar-DD")
+shortLabels = c("Pbar-LD", "Pbar-DD")
+
+# specify the samples
+samples.list <- list(
+  # set 1: reference
+  pbar.dat,
+  # set 2
+  pbar.dat.dd
+)
+
+# Form multi-set expression data: columns starting from 9 contain actual expression data.
+multiExpr = vector(mode = "list", length = nSets)
+
+multiExpr[[1]] = list(data = as.data.frame(t(log2(samples.list[[1]][-c(1)]+1))));
+names(multiExpr[[1]]$data) = samples.list[[1]]$gene_name;
+rownames(multiExpr[[1]]$data) = names(samples.list[[1]])[-c(1)];
+
+multiExpr[[2]] = list(data = as.data.frame(t(log2(samples.list[[2]][-c(1)]+1))));
+names(multiExpr[[2]]$data) = samples.list[[2]]$gene_name;
+rownames(multiExpr[[2]]$data) = names(samples.list[[2]])[-c(1)];
+# Check that the data has the correct format for many functions operating on multiple sets:
+exprSize = checkSets(multiExpr)
+
+# Check that all genes and samples have sufficiently low numbers of missing values.
+gsg = goodSamplesGenesMS(multiExpr, verbose = 3);
+writeLines("All samples okay?")
+gsg$allOK
+
+# Use the following code to check the data
+# multiExpr[[1]]$data[,1:3]
+
+```
+
+
+### 1.3 Check samples
+
+```{r check_samples}
+# We now cluster the samples on their Euclidean distance, separately in each set.
+sampleTrees = list()
+for (set in 1:nSets) {
+  sampleTrees[[set]] = hclust(dist(multiExpr[[set]]$data), method = "average")
+}
+
+
+# png(file = paste0(path_to_repo,"/results/temp_files/Plots/TC6_SampleClustering.png"), 
+#     width = 20, height = 30, units = "cm", res = 300)
+par(mfrow=c(1,2))
+# par(mar = c(0, 4, 2, 0))
+for (set in 1:nSets)
+  plot(sampleTrees[[set]], main = paste("Sample clustering in", setLabels[set]),
+       xlab="", sub="", cex = 0.7)
+# dev.off()
+
+# Define data set dimensions
+nGenes = exprSize$nGenes
+nSamples = exprSize$nSamples
+
+# save(multiExpr, 
+#      # Traits, 
+#      nGenes, nSamples, setLabels, shortLabels, exprSize,
+#      file = "TC6_Consensus-dataInput.RData")
+
+
+```
+
+## Step 2: Module preservation
+
+#### Prep data
+
+- Load/Prep the expression data for control and Okim
+- Load/Prep the module identity for each control gene
+- Run the modulePreservation function & save the result
+
+
+```{r prep_data}
+
+# Expression data
+multiExpr_1 = list(control = list(data = multiExpr[[1]]$data), 
+                   ophio = list(data = multiExpr[[2]]$data));
+
+# module identity for Cflo-control gene
+## specify the location of the csv that has this info.
+file_loc <- "/results/wgcna_files/res/pbar_ld_module_identity_new_labels.csv"
+## load it into R
+mod.identity.all <- read.csv(paste0(path_to_repo,file_loc), stringsAsFactors = F) 
+writeLines("there are 9925 genes in the original network that were classified into 11 modules")
+
+## filter to keep only the genes that we are working with
+which.genes <- common.genes
+mod.identity <-
+  mod.identity.all %>% 
+  filter(gene_name %in% which.genes) %>% 
+  select(gene_name, 
+         module_identity=old_labels) %>%
+  # !!this step is necessary!! #
+  arrange(gene_name)  
+  
+  
+## specify the module identity of the genes
+moduleColors <- mod.identity %>% pull(module_identity)
+multiColor = list(control = moduleColors);
+
+```
+
+#### Run modulePreservation
+
+```{r}
+# # Run module preservation function
+# mp = modulePreservation(multiExpr_1, multiColor,
+#                           referenceNetworks = 1,
+#                           nPermutations = 200,
+#                           calculateQvalue = TRUE,
+#                           randomSeed = 1,
+#                           quickCor = 0,
+#                           verbose = 3)
+# 
+# save(mp, file = paste0(path_to_repo,
+#                       "/results/module_preservation/pbar_ld_dd/modulePreservation_Pbar_LD_v_DD.RData"));
+
+## or load the results for faster access
+load(file = paste0(path_to_repo,
+                   "/results/module_preservation/pbar_ld_dd/modulePreservation_Pbar_LD_v_DD.RData"));
+
+```
+
+
+#### Plot results
+
+```{r fig.width=4, fig.height=6}
+ref = 1
+test = 2
+statsObs = cbind(mp$quality$observed[[ref]][[test]], mp$preservation$observed[[ref]][[test]])
+statsZ = cbind(mp$quality$Z[[ref]][[test]][,-1], mp$preservation$Z[[ref]][[test]][,-1]);
+
+# Compare preservation to quality:
+z.stats <- cbind(statsObs[, c("moduleSize", "medianRank.pres", "medianRank.qual")],
+             signif(statsZ[, c("Zsummary.pres", "Zsummary.qual")], 2)) 
+z.stats <-
+  z.stats %>%
+  rownames_to_column("old_labels") %>% 
+    left_join(unique(mod.identity.all[-1]), by="old_labels") %>%
+    select(-1) %>% 
+    select(module_name = module_identity,
+           module_size = moduleSize,
+           everything())
+
+
+mains = c("Preservation Median rank", "Preservation Zsummary")
+pd <- position_dodge(0.5)
+
+  
+z.stats %>%
+  mutate(module_name = factor(module_name, levels = unique(mod.identity.all$module_identity))) %>%
+  na.omit() %>% 
+
+  # ## PRESERVATION MEDIAN RANK
+  # ggplot(aes(x=log10(module_size), y=medianRank.pres)) +
+  
+  ## PRESERVATION Z-SUMMARY
+  ggplot(aes(x=log10(module_size), y=Zsummary.pres)) +
+  geom_hline(yintercept = c(2,10), col="darkred", alpha=0.5) +
+  
+  geom_point(alpha=0.5, size=15, col="lightgrey", position = pd) +
+  geom_text(aes(label=module_name), check_overlap = T) +
+  
+  theme_Publication(20) +
+  scale_colour_Publication() +
+  
+  scale_x_continuous(limits = c(0,max(log10(1000))+0.5),
+                     breaks = c(0,1,2,3),
+                     labels = c("0","10","100","1000")) +
+  
+  xlab("module size (genes)") +
+  ylab(mains[2]) +
+  ggtitle("")
+
+# 
+# # Module labels and module sizes are also contained in the results
+# modColors = rownames(mp$preservation$observed[[ref]][[test]])
+# moduleSizes = mp$preservation$Z[[ref]][[test]][, 1];
+# 
+# # leave grey and gold modules out
+# plotMods = !(modColors %in% c("grey","gold"));
+# 
+# # Text labels for points
+# text = modColors[plotMods];
+# 
+# # Auxiliary convenience variable
+# plotData = cbind(mp$preservation$observed[[ref]][[test]][, 2], mp$preservation$Z[[ref]][[test]][, 2])
+# 
+# # Plot
+# mains = c("Preservation Median rank", "Preservation Zsummary");
+# # sizeGrWindow(10, 5);
+# par(mfrow = c(1,2))
+# par(mar = c(4.5,4.5,2.5,1))
+# for (p in 1:2)
+# {
+#   min = min(plotData[, p], na.rm = TRUE);
+#   max = max(plotData[, p], na.rm = TRUE);
+#   # Adjust ploting ranges appropriately
+#   if (p==2)
+#   {
+#     if (min > -max/10) min = -max/10
+#     ylim = c(min - 0.1 * (max-min), max + 0.1 * (max-min))
+#   } else
+#     ylim = c(max + 0.1 * (max-min), min - 0.1 * (max-min))
+#   plot(moduleSizes[plotMods], plotData[plotMods, p], col = 1, bg = modColors[plotMods], pch = 21,
+#        main = mains[p],
+#        cex = 2.5,
+#        alpha=0.75,
+#        ylab = mains[p], xlab = "Module size", log = "x",
+#        ylim = ylim,
+#        xlim = c(1, 4000), cex.lab = 1.2, cex.axis = 1.2, cex.main =1.4)
+#   if(p==1)
+#     text(moduleSizes[plotMods], plotData[plotMods, p], labels=modColors[plotMods], cex=0.75, font=0.75, pos=1)
+#   if (p==2) {
+#     abline(h=0)
+#     abline(h=c(2,10), col = "darkred", lty = 2)
+#     # abline(h=10, col = "darkgreen", lty = 2)
+#     # abline(h=30, col = "darkred", lty=2)
+#   } }
+```
+
+NOTES:
+
+- Looking into the WGCNA [tutorial](https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/ModulePreservation/Tutorials/HumanChimp.pdf), it seems that the gold module contains a random sample of 1000 genes.
+
+> "The “gold” module consists of 1000 randomly selected genes that represent a sample of the whole network".
+
+
+## EXPLORE MODULE
+
+```{r explore_module, fig.height=10, fig.width=5}
+
+# devtools::install_github("biplabendu/timecourseRnaseq", 
+#                          repos = "https://mran.microsoft.com/snapshot/2021-09-01")
+
+# writeLines("Module: 2")
+# mod.identity.all %>% 
+#   filter(module_identity == "C2") %>% 
+#   pull(gene_name) %>% 
+#   unique() %>% 
+#   check_enrichment(org="pbar",
+#                    what = "pfams",
+#                    verbose = T,
+#                    expand = T,
+#                    plot = T,
+#                    bg=mod.identity.all %>% pull(gene_name)) %>% 
+#   
+#   pull(gene_name) %>% 
+#   stacked.zplot(text_size=35) %>% 
+#   multi.plot(rows=2,cols=1)
+# 
+# writeLines("Module: 1")
+# mod.identity.all %>% 
+#   filter(module_identity == "C1") %>% 
+#   pull(gene_name) %>% 
+#   unique() %>% 
+#   check_enrichment(org="pbar",
+#                    what = "pfams",
+#                    verbose = T,
+#                    expand = T,
+#                    plot = T,
+#                    bg=mod.identity.all %>% pull(gene_name)) %>% 
+#   
+#   pull(gene_name) %>% 
+#   stacked.zplot(text_size=35) %>% 
+#   multi.plot(rows=2,cols=1)
+# 
+# writeLines("Module: 10")
+# mod.identity.all %>% 
+#   filter(module_identity == "C10") %>% 
+#   pull(gene_name) %>% 
+#   unique() %>% 
+#   check_enrichment(org="pbar",
+#                    what = "pfams",
+#                    verbose = T,
+#                    expand = T,
+#                    plot = T,
+#                    bg=mod.identity.all %>% pull(gene_name)) %>% 
+#   
+#   pull(gene_name) %>% 
+#   stacked.zplot(text_size=35) %>% 
+#   multi.plot(rows=2,cols=1)
+# 
+# writeLines("Module: 11")
+# mod.identity.all %>% 
+#   filter(module_identity == "C11") %>% 
+#   pull(gene_name) %>% 
+#   unique() %>% 
+#   check_enrichment(org="pbar",
+#                    what = "pfams",
+#                    verbose = T,
+#                    expand = T,
+#                    plot = T,
+#                    bg=mod.identity.all %>% pull(gene_name)) %>% 
+#   
+#   pull(gene_name) %>% 
+#   stacked.zplot(text_size=35) %>% 
+#   multi.plot(rows=2,cols=1)
+
+```
+

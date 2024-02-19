@@ -1,0 +1,338 @@
+---
+title: "compile_gene_exp_by_sample: Pogo: Read 1"
+author: "Biplabendu Das"
+date: "8/13/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# S01 Sample: DD (read 1)
+
+01 Read all the normalized gene expression files for Camponotus floridanus (control)
+
+```{r}
+# Absolute path to the data
+path_to_data = "./data/00_norm_gene_exp/"
+path_to_results = "./results/gene_exp/"
+##-##-##-##-##-##-##-##-##-##-
+sample = "DD"  
+##-##-##-##-##-##-##-##-##-##-
+read = "1"
+
+# load libraries
+library(data.table)
+library(tidyverse)
+
+# list all the normalized_gene_exp files (n = 12; Ophio_cflo)
+data_all=list.files(path = paste0(path_to_data,sample),
+                    pattern='*.csv')[-1]
+```
+
+02 Read the files, extract the columns of interest, and compile them into one table
+
+```{r}
+
+foo <- data.frame()
+
+for (i in 1:length(data_all)) {
+  
+  if (i == 1) {
+  foo <-
+    read.csv(file = paste0(path_to_data,sample,"/",data_all[i]), header = T, sep = "\t") %>%
+          # select the data for ZT02 (value_1) and ZT04 (value_2)
+          select(gene_name=gene, value_1, value_2) %>% 
+          # keep only the gene names that start with LOC (these are the actual genes)
+          filter(grepl("LOC", gene_name))
+
+  names(foo)[2] <- paste0("ZT", str_split(str_split(data_all[i], "_")[[1]][3], ".csv")[[1]][1])
+  names(foo)[3] <- paste0("ZT", str_split(str_split(data_all[i], "_")[[1]][5], ".csv")[[1]][1])
+  }
+  
+  else {
+    
+    bar = read.csv(file = paste0(path_to_data,sample,"/",data_all[i]), header = T, sep = "\t") %>%
+           # we do not need the data for ZT02 (value_1)
+          select(gene_name=gene, value_2) %>% 
+          # keep only the gene names that start with LOC (these are the actual genes)
+          filter(grepl("LOC", gene_name))
+    
+    names(bar)[2] <- paste0("ZT",
+                            str_split(str_split(data_all[i], "_")[[1]][5], ".csv")[[1]][1])
+    
+    foo <- foo %>% 
+            left_join(bar, by="gene_name")
+    
+  }
+
+}
+
+# Take a look at the compiled table
+dd_read1 <- foo
+
+# Save the compiled dataframe "foo"
+write.csv(foo,
+          file = paste0(path_to_results,sample,"/normalized_fpkm_pogo_", sample, "_read",read,".csv"),
+          row.names = F)
+
+```
+
+
+# S02 Sample: LD (read 1)
+
+
+01 Read all the normalized gene expression files
+
+```{r}
+# Absolute path to the data
+path_to_data = "./data/00_norm_gene_exp/"
+path_to_results = "./results/gene_exp/"
+##-##-##-##-##-##-##-##-##-##-
+sample = "LD"  
+##-##-##-##-##-##-##-##-##-##-
+read = "1"
+
+# load libraries
+library(data.table)
+library(tidyverse)
+
+# list all the normalized_gene_exp files (n = 12; Ophio_cflo)
+data_all=list.files(path = paste0(path_to_data,sample),
+                    pattern='*.csv')[-1]
+```
+
+02 Read the files, extract the columns of interest, and compile them into one table
+
+```{r}
+foo <- data.frame()
+
+for (i in 1:length(data_all)) {
+  
+  if (i == 1) {
+  foo <-
+    read.csv(file = paste0(path_to_data,sample,"/",data_all[i]), header = T, sep = "\t") %>%
+          # select the data for ZT02 (value_1) and ZT04 (value_2)
+          select(gene_name=gene, value_1, value_2) %>% 
+          # keep only the gene names that start with LOC (these are the actual genes)
+          filter(grepl("LOC", gene_name))
+
+  names(foo)[2] <- paste0("ZT", str_split(str_split(data_all[i], "_")[[1]][3], ".csv")[[1]][1])
+  names(foo)[3] <- paste0("ZT", str_split(str_split(data_all[i], "_")[[1]][5], ".csv")[[1]][1])
+  }
+  
+  else {
+    
+    bar = read.csv(file = paste0(path_to_data,sample,"/",data_all[i]), header = T, sep = "\t") %>%
+           # we do not need the data for ZT02 (value_1)
+          select(gene_name=gene, value_2) %>% 
+          # keep only the gene names that start with LOC (these are the actual genes)
+          filter(grepl("LOC", gene_name))
+    
+    names(bar)[2] <- paste0("ZT",
+                            str_split(str_split(data_all[i], "_")[[1]][5], ".csv")[[1]][1])
+    
+    foo <- foo %>% 
+            left_join(bar, by="gene_name")
+    
+  }
+
+}
+
+# Take a look at the compiled table
+ld_read1 <- foo
+
+# Save the compiled dataframe "foo"
+write.csv(foo,
+          file = paste0(path_to_results,sample,"/normalized_fpkm_pogo_", sample, "_read",read,".csv"),
+          row.names = F)
+
+```
+
+___
+
+> NOW COMPILING READ-2 DATA...
+
+___
+
+# S03 Sample: DD (read 2)
+
+01 Read all the normalized gene expression files for Camponotus floridanus (control)
+
+```{r}
+# Absolute path to the data
+path_to_data = "./data/00_norm_gene_exp/read2/"
+path_to_results = "./results/gene_exp/"
+##-##-##-##-##-##-##-##-##-##-
+sample = "DD"  
+##-##-##-##-##-##-##-##-##-##-
+read = "2"
+
+# load libraries
+library(data.table)
+library(tidyverse)
+
+# list all the normalized_gene_exp files (n = 12; Ophio_cflo)
+data_all=list.files(path = paste0(path_to_data,sample),
+                    pattern='*.csv')[-1]
+```
+
+02 Read the files, extract the columns of interest, and compile them into one table
+
+```{r}
+
+foo <- data.frame()
+
+for (i in 1:length(data_all)) {
+  
+  if (i == 1) {
+  foo <-
+    read.csv(file = paste0(path_to_data,sample,"/",data_all[i]), header = T, sep = "\t") %>%
+          # select the data for ZT02 (value_1) and ZT04 (value_2)
+          select(gene_name=gene, value_1, value_2) %>% 
+          # keep only the gene names that start with LOC (these are the actual genes)
+          filter(grepl("LOC", gene_name))
+
+  names(foo)[2] <- paste0("ZT", str_split(str_split(data_all[i], "_")[[1]][3], ".csv")[[1]][1])
+  names(foo)[3] <- paste0("ZT", str_split(str_split(data_all[i], "_")[[1]][5], ".csv")[[1]][1])
+  }
+  
+  else {
+    
+    bar = read.csv(file = paste0(path_to_data,sample,"/",data_all[i]), header = T, sep = "\t") %>%
+           # we do not need the data for ZT02 (value_1)
+          select(gene_name=gene, value_2) %>% 
+          # keep only the gene names that start with LOC (these are the actual genes)
+          filter(grepl("LOC", gene_name))
+    
+    names(bar)[2] <- paste0("ZT",
+                            str_split(str_split(data_all[i], "_")[[1]][5], ".csv")[[1]][1])
+    
+    foo <- foo %>% 
+            left_join(bar, by="gene_name")
+    
+  }
+
+}
+
+# Take a look at the compiled table
+dd_read2 <- foo
+
+# Save the compiled dataframe "foo"
+write.csv(foo,
+          file = paste0(path_to_results,sample,"/normalized_fpkm_pogo_", sample, "_read",read,".csv"),
+          row.names = F)
+
+```
+
+
+# S02 Sample: LD (read 2)
+
+
+01 Read all the normalized gene expression files
+
+```{r}
+# Absolute path to the data
+path_to_data = "./data/00_norm_gene_exp/read2/"
+path_to_results = "./results/gene_exp/"
+##-##-##-##-##-##-##-##-##-##-
+sample = "LD"  
+##-##-##-##-##-##-##-##-##-##-
+read = "2"
+
+# load libraries
+library(data.table)
+library(tidyverse)
+
+# list all the normalized_gene_exp files (n = 12; Ophio_cflo)
+data_all=list.files(path = paste0(path_to_data,sample),
+                    pattern='*.csv')[-1]
+```
+
+02 Read the files, extract the columns of interest, and compile them into one table
+
+```{r}
+foo <- data.frame()
+
+for (i in 1:length(data_all)) {
+  
+  if (i == 1) {
+  foo <-
+    read.csv(file = paste0(path_to_data,sample,"/",data_all[i]), header = T, sep = "\t") %>%
+          # select the data for ZT02 (value_1) and ZT04 (value_2)
+          select(gene_name=gene, value_1, value_2) %>% 
+          # keep only the gene names that start with LOC (these are the actual genes)
+          filter(grepl("LOC", gene_name))
+
+  names(foo)[2] <- paste0("ZT", str_split(str_split(data_all[i], "_")[[1]][3], ".csv")[[1]][1])
+  names(foo)[3] <- paste0("ZT", str_split(str_split(data_all[i], "_")[[1]][5], ".csv")[[1]][1])
+  }
+  
+  else {
+    
+    bar = read.csv(file = paste0(path_to_data,sample,"/",data_all[i]), header = T, sep = "\t") %>%
+           # we do not need the data for ZT02 (value_1)
+          select(gene_name=gene, value_2) %>% 
+          # keep only the gene names that start with LOC (these are the actual genes)
+          filter(grepl("LOC", gene_name))
+    
+    names(bar)[2] <- paste0("ZT",
+                            str_split(str_split(data_all[i], "_")[[1]][5], ".csv")[[1]][1])
+    
+    foo <- foo %>% 
+            left_join(bar, by="gene_name")
+    
+  }
+
+}
+
+# Take a look at the compiled table
+ld_read2 <- foo
+
+# Save the compiled dataframe "foo"
+write.csv(foo,
+          file = paste0(path_to_results,sample,"/normalized_fpkm_pogo_", sample, "_read",read,".csv"),
+          row.names = F)
+
+```
+
+___
+
+# Collate read1 and read2
+
+For each Pbar gene, I am calculating the average FPKM across the two reads (read1 and read2).
+
+
+> LD
+
+```{r collate_LD}
+
+sample="LD"
+
+dat.ld <- ld_read2 %>% as_tibble()
+
+for (i in 2:ncol(ld_read2)) {
+  dat.ld[,i] <- (ld_read1[,i] + ld_read2[,i])/2
+}
+
+write.csv(dat.ld,
+          file = paste0(path_to_results,sample,"/normalized_fpkm_pogo_", sample,".csv"),
+          row.names = F)
+```
+
+> DD
+
+```{r collate_DD}
+
+sample="DD"
+
+dat.dd <- dd_read2 %>% as_tibble()
+
+for (i in 2:ncol(dd_read2)) {
+  dat.dd[,i] <- (dd_read1[,i] + dd_read2[,i])/2
+}
+
+write.csv(dat.dd,
+          file = paste0(path_to_results,sample,"/normalized_fpkm_pogo_", sample,".csv"),
+          row.names = F)
+```
+

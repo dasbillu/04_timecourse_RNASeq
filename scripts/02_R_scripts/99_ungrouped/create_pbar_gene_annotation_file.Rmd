@@ -1,0 +1,209 @@
+---
+title: "Create Pbar gene annotation file"
+author: Biplabendu Das
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: united
+    keep_md: no
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = F)
+knitr::opts_chunk$set(message = F)
+
+## For more inspiration on customizing the html output, refer to the following:
+# https://bookdown.org/yihui/rmarkdown/html-document.html#table-of-contents
+
+```
+
+
+```{r housekeeping, include=FALSE}
+set.seed(420)
+rm(list = ls())
+
+#' Load the libraries
+pacman::p_load(dplyr, tidyr, stringr)
+
+## set path to your working directory
+path_to_repo = "~/Documents/05_postdoc/Deborah_Gordon/04_research/2022/04_timecourse_RNASeq"
+
+```
+
+## LOAD DATA
+
+> Load interproscan results and genome annotations from ncbi
+
+```{r load_files}
+pbar.ipr.dat <-
+  read.csv(paste0(path_to_repo,
+                  "/data/05_genome_annotations/",
+                  "pbar_protein_annots.csv"),
+           header = T, stringsAsFactors = F, na.strings = c(""," ",".", "NA", "-")) %>%
+  as_tibble() %>% 
+  distinct()
+
+pbar.ncbi.dat <-
+  read.csv(paste0(path_to_repo,
+                  "/data/05_genome_annotations/",
+                  "pbar_genome_annots_from_ncbi.csv"),
+           header = T, stringsAsFactors = F, na.strings = c(""," ",".", "NA")) %>%
+  as_tibble() %>% 
+  select(protein_name, gene_name, 
+         accession, seq_start, seq_end, seq_length, 
+         old_annotation)
+
+```
+
+## CREATE SUMMARY FILE
+
+> Summarize the interproscan results
+
+```{r summarize_ipr_results}
+dat <- 
+  pbar.ipr.dat %>% 
+  select(protein_name, pfams, pfam_desc, GOs) %>%
+  distinct() %>% 
+  
+  left_join(pbar.ncbi.dat %>% select(protein_name, gene_name)) %>% 
+  select(gene_name, everything()) %>% 
+  
+  select(-protein_name) %>% 
+  distinct() %>% 
+  arrange(gene_name) %>% 
+  mutate(pfams = paste0(pfams,"|",pfam_desc)) %>% 
+  select(-pfam_desc) %>% 
+  
+  group_by(gene_name) %>% 
+  summarize(pfams = paste(pfams, collapse = "; "),
+            GOs = paste(GOs %>% na.omit() %>% unique(), collapse = "|")) %>% 
+  ungroup() %>% 
+  
+  mutate(GOs = str_replace_all(GOs, fixed("|"), "; "))
+
+```
+
+## OBTAIN GO ANNOTATIONS
+
+## OBTAIN GO ANNOTS - v1
+
+```{r get_GO_annots_v1}
+pbar.gos.all <-
+  dat %>% 
+    select(gene_name, GOs) %>% 
+    separate_rows(GOs, sep="; ") %>% 
+    mutate_all(as.factor) %>% 
+    filter(GOs != "") %>% 
+    pull(GOs) %>% 
+    as.character() %>% 
+    unique()
+
+# load the GOs-namespace file
+go.annots <- read.csv(paste0(path_to_repo,
+                             "/data/05_genome_annotations/",
+                             "distinct_gos_namespace.csv")) %>% as_tibble()
+colnames(go.annots) <- c("GOs", "GO_desc", "GO_namespace", "GO_desc_long")
+
+## check to see how many of our GOs are not present in the above file
+pbar.gos.available <- 
+  go.annots %>% 
+  filter(GOs %in% pbar.gos.all) %>% 
+  pull(GOs) %>% unique()
+
+pbar.gos.missing <- setdiff(pbar.gos.all, pbar.gos.available)
+```
+
+> 86 out of the 1229 GOs annotated in Pbar genome do not have a annotation term.
+
+## OBTAIN GO ANNOTS - v2
+
+```{r get_GO_annots_v2}
+library(httr)
+library(jsonlite)
+library(xml2)
+library(tibble)
+
+getGoDetails <- function(go_id) {
+    server <- "https://rest.ensembl.org/ontology/id/"
+
+    r <- GET(paste(server, go_id, sep = ""), 
+             content_type("application/json"))
+
+    stop_for_status(r)
+
+    res <- fromJSON(toJSON(content(r)))
+    tibble(id = res$accession, 
+               name = res$name, 
+               definition = res$definition)
+}
+
+## The following GOs have no annotations in the database
+pbar.gos.missing <- pbar.gos.missing[-12] # GO:0070122
+
+missing.gos <- list()
+for (i in 1:length(pbar.gos.missing)) {
+  missing.gos[[i]] <- getGoDetails(pbar.gos.missing[i])
+}
+
+go.annots.missing <- 
+  do.call("rbind", missing.gos) %>% 
+  select(GOs = id,
+         GO_desc = name,
+         GO_desc_long = definition)
+```
+
+> Description for code chunk above
+
+
+## PRODUCE FINAL FILE
+
+```{r finalize_output_file}
+## Combine the two files
+pbar.go.annots <- 
+  rbind(go.annots %>% select(-3), go.annots.missing)
+
+## add the information to the master annotation file
+pbar.annots.dat <- 
+  dat %>% 
+  separate_rows(GOs, sep="; ") %>% 
+  left_join(pbar.go.annots %>% select(1:2), by = "GOs") %>% 
+  
+  mutate(GOs = paste0(GOs, "|", GO_desc)) %>% 
+  select(-GO_desc) %>% 
+  
+  group_by(gene_name, pfams) %>% 
+  summarize(GOs = paste(GOs, collapse = "; ")) %>% 
+  ungroup() %>% 
+  
+  mutate(GOs= ifelse(GOs=="NA|NA", NA, GOs)) %>% 
+  mutate(GOs= ifelse(GOs=="|NA", NA, GOs))
+```
+
+
+## EXPORT FILE WITH GENE DESC
+
+```{r export_file}
+## format: CSV
+pbar.ncbi.dat %>% 
+  select(gene_name, old_annotation) %>% 
+  left_join(pbar.annots.dat) %>%  
+  write.csv(file = paste0(path_to_repo,
+                          "/results/genome_annotations/",
+                          "pbar_annots_2May23.csv"),
+            row.names = F)
+## format: Rdata
+pbar.ncbi.dat %>% 
+  select(gene_name, old_annotation) %>% 
+  left_join(pbar.annots.dat) %>% 
+  saveRDS(file = paste0(path_to_repo,
+                          "/results/genome_annotations/",
+                          "pbar_annots_2May23.Rds"))
+```
+

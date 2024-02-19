@@ -1,0 +1,498 @@
+---
+title: "Cflo-healthy-controls (TC7)"
+author: Biplabendu Das
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: united
+    keep_md: no
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = F)
+knitr::opts_chunk$set(message = F)
+
+## For more inspiration on customizing the html output, refer to the following:
+# https://bookdown.org/yihui/rmarkdown/html-document.html#table-of-contents
+
+```
+
+
+```{r housekeeping, include=FALSE}
+set.seed(420)
+rm(list = ls())
+
+## Load the libraries
+pacman::p_load(pheatmap, dendextend, tidyverse, viridis)
+pacman::p_load(RSQLite, tidyverse, dbplyr, DT, conflicted)
+pacman::p_load(patchwork)
+
+## set conflict preference
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflict_prefer("layout", "plotly")
+conflict_prefer("hclust", "flashClust")
+
+## set path to your working directory
+path_to_repo = "/Users/biplabendudas/Documents/GitHub/Das_et_al_2022b"
+
+## load functions
+# customized theme for publication quality figures
+source(paste0(path_to_repo,"/functions/theme_publication.R"))
+# function to perform enrichment analysis
+source(paste0(path_to_repo,"/functions/enrichment_analysis.R"))
+# function to plot z-scores (Cflo genes only)
+source(paste0(path_to_repo,"/functions/plot_zscores.R"))
+
+```
+
+
+```{r set_parameters}
+
+# SAMPLE NAME
+## specify focal sample for analyis
+sample.name <- "cflo_control"
+
+# SCRIPT NAME
+## specify the name of the script (folder) where figures will be saved
+script.name <- "01_general_patterns_of_gene_exp"
+
+# eJTK OUTPUT
+## Set GammaP threshold below which genes are classified as rhythmic
+gamma.pval = 0.05
+
+
+```
+
+
+```{r load_data}
+
+# LOAD DATABASES (TC7)
+## 1. TC7_ejtk.db
+# writeLines("Loading 'TC7_ejtk' database that contains all ejtk-output for TC7")
+ejtk.db <- dbConnect(RSQLite::SQLite(),
+                   paste0(path_to_repo, "/data/databases/TC7_ejtk.db"))
+# which tables are in the database
+# src_dbi(ejtk.db)
+
+## 2. TC7_data.db
+# writeLines("Loading 'TC7_data' database that contains all expression data for TC7")
+data.db <- dbConnect(RSQLite::SQLite(),
+                     paste0(path_to_repo, "/data/databases/TC7_data.db"))
+# src_dbi(data.db)
+
+```
+
+
+## Overview/Goals
+
+Using time-course RNASeq data from healthy Cflo forager heads: 
+
+- identify the list of "expressed" genes (≥ 1 FPKM for at least one time point), 
+- identify list of rhythmic genes (24h, 12h, and 08h)
+- characterize their daily expression patterns
+- find biological processes enriched in these rhythmic genesets
+- compare rhythmic genes in heads to those identified in brains
+
+
+## Part 1: General patterns of gene expression
+
+### 1.1 Non-expressed genes
+
+- Genes that have NO expression in ant heads (FPKM = 0 at all time points)
+
+```{r non_expressed}
+
+# which genes have zero expression at all time points
+not.expressed <-
+  tbl(data.db, paste0(sample.name ,"_fpkm")) %>% 
+  collect() %>% 
+  filter_at(vars(starts_with("Z")), all_vars(. == 0)) %>%
+  pull(gene_name)
+
+writeLines("How many genes have zero expression in healthy Cflo heads at all time points?")
+length(not.expressed)
+
+writeLines("Which GO terms are enriched in this set of non-expressed genes?")
+not.expressed %>% 
+  go_enrichment(.,
+                function.dir = path_to_repo,
+                org = "cflo", 
+                bg = "all") %>%  # enrichment against all ophio_cflo genes in the genome
+  go_enrichment_plot(clean = "no",
+                     function.dir = path_to_repo)
+
+# save the processes that are enriched 
+not.expressed.process <- 
+  not.expressed %>% 
+  go_enrichment(.,
+                function.dir = path_to_repo,
+                org = "cflo", 
+                bg = "all") %>%
+  select(GO, GO_desc, over_under, adj_pVal) %>% 
+  filter(over_under == "over") %>% 
+  filter(adj_pVal < 0.05) %>% 
+  pull(GO)
+
+```
+
+Are these the same genes/proecesses that were either not- or lowly-expressed in Cflo brains?
+
+```{r}
+tc5.path_to_repo <- "/Users/biplabendudas/Documents/GitHub/Das_et_al_2021"
+  
+## 3. TC5_data.db
+tc5.data.db <- dbConnect(RSQLite::SQLite(),
+                     paste0(tc5.path_to_repo, "/data/TC5_data.db"))
+
+src_dbi(tc5.data.db)
+
+# save the non-expressed genes in forager brains
+non.expressed.for <- 
+  tbl(tc5.data.db, paste0("annot_fpkm")) %>% 
+  select(gene_name,X2F:X24F) %>% 
+  collect() %>% 
+  na.omit() %>% 
+  filter_at(vars(starts_with("X")), all_vars(. == 0)) %>% 
+  pull(gene_name)
+
+# save the processes enriched
+non.expressed.for.process <-
+  non.expressed.for %>% 
+  go_enrichment(.,
+                function.dir = path_to_repo,
+                org = "cflo", 
+                bg = "all") %>% 
+  select(GO, GO_desc, over_under, adj_pVal) %>% 
+  filter(over_under == "over") %>% 
+  filter(adj_pVal < 0.05) %>% 
+  pull(GO)
+
+# plot the results
+non.expressed.for %>% 
+  go_enrichment(.,
+                function.dir = path_to_repo,
+                org = "cflo", 
+                bg = "all") %>%
+  go_enrichment_plot(clean = "no", function.dir = path_to_repo)
+```
+
+Now, perform Fisher's exact tests to check for significant overlap
+
+1. Genes not expressed
+
+```{r fishers_non_expressed_genes}
+
+set.1 <- not.expressed # forager heads
+set.2 <- non.expressed.for # forager brains
+
+tot.genes <- 13808 # all genes in the Cflo genome
+
+# To create the contingency table for module-7 (set-1) and for.rhy (set-2), we will need the following information:
+# genes that are in both sets
+overlapping.genes <- intersect(set.1, set.2) %>% length()
+# genes in set-1 but not in set-2
+set.1.not.set.2 <- setdiff(set.1, set.2) %>% length()
+# genes in set-2 but not in set-1
+set.2.not.set.1 <- setdiff(set.2, set.1) %>% length()
+# background genes not in set-1 or set-2
+not.set.1.set.2 <- tot.genes - (union(set.1, set.2) %>% unique() %>% length())
+
+# Contingency table for set.1 and set.2
+test.table <- 
+  data.frame(
+    in.set.2 = c(overlapping.genes, set.2.not.set.1),
+    not.set.2 = c(set.1.not.set.2, not.set.1.set.2)
+  )
+rownames(test.table) <- c("in.set.1", "not.set.1")
+
+# take a look at the contingency table
+test.table
+
+# fisher test
+fisher.test(test.table)
+
+
+```
+
+
+### 1.2 Expressed genes
+
+- Genes that are expressed in ant heads (≥ 1 FPKM for at least one time point)
+
+```{r expressed}
+
+# which genes are expressed in ant heads?
+expressed <- 
+  tbl(data.db, paste0(sample.name,"_expressed_genes")) %>% 
+  filter(expressed=="yes") %>% 
+  collect() %>% 
+  pull(gene_name)
+
+writeLines("How many genes are expressed in healthy Cflo heads?")
+length(expressed)
+
+```
+
+> Note, this set of `r length(expressed)` genes will be used as the background geneset for performing GO/PFAM enrichments for our genesets of interest.
+
+## Part 2: Diurnal rhythms in gene expression
+
+### 2.1 Load rhythmic genesets
+
+```{r rhythmic_genes}
+
+## Load all the rhythmic genesets 
+## Note, ordered according to their p-value; highly rhythmic at the top.
+
+# Circadian genes (period = 24h)
+## get the gene-names for sig. 24h-rhythmic genes
+rhy.24 <-
+  tbl(ejtk.db, paste0(sample.name,"_zscores_24h")) %>% 
+  filter(GammaP < gamma.pval) %>% 
+  select(ID, GammaP) %>% collect() %>% arrange(GammaP) %>%
+  select(ID) %>% pull()
+
+# Ultradian genes (period = 12h)
+## get the gene-names for sig. 12h-rhythmic genes
+rhy.12 <-
+  tbl(ejtk.db, paste0(sample.name,"_zscores_12h")) %>%
+  filter(GammaP < gamma.pval) %>%
+  select(ID, GammaP) %>% collect() %>% arrange(GammaP) %>%
+  select(ID) %>% pull()
+
+# Ultradian genes (period = 08h)
+## get the gene-names for sig. 08h-rhythmic genes
+rhy.08 <-
+  tbl(ejtk.db, paste0(sample.name,"_zscores_08h")) %>%
+  filter(GammaP < gamma.pval) %>%
+  select(ID, GammaP) %>% collect() %>% arrange(GammaP) %>%
+  select(ID) %>% pull()
+
+writeLines(paste0("How many sig. rhythmic genes are there in healthy Cflo heads? (GammaP < ",gamma.pval, ")"))
+rhy.genes <- list(rhy.24,rhy.12,rhy.08)
+names(rhy.genes) <- paste0(sample.name, c("_24h", "_12h", "_08h"))
+sapply(rhy.genes,length)
+
+```
+
+### 2.2 Hierarchical clustering and plotting heatmaps
+
+- perform hierarchical clustering of the rhythmic genes,
+- plot time-course heatmaps for the clustered rhythmic geneset,
+- identify the day-peaking and night-peaking clusters visually.
+
+```{r heatmaps}
+
+## load zscore dataset
+zscore.dat <- data.db %>% tbl(., paste0(sample.name,"_zscores")) %>% collect()
+
+# make a list to save the cluster information
+my_gene_col <- list()
+
+# Filter the zscores to keep only rhythmic genes
+for (i in 1:length(rhy.genes)){
+  
+  writeLines(paste0("Clustering and plotting heatmaps for ", names(rhy.genes)[i]))
+  
+  # filter the zscores for the rhythmic geneset
+  zscore.rhy <- 
+    zscore.dat %>% 
+    filter(gene_name %in% rhy.genes[[i]]) %>% # either (rhy.8, rhy.12, or rhy.24)
+    as.data.frame()
+  
+  # Set genes as rownames and convert it into a matrix
+  rownames(zscore.rhy) = zscore.rhy$gene_name
+  zscore.rhy <- as.matrix(zscore.rhy[-1])
+  
+  
+  # Hierarchical clustering the geneset
+  my_hclust_gene <- hclust(dist(zscore.rhy), method = "complete")
+  
+  
+  # Make annotations for the heatmaps
+  my_gene_col[[i]] <- cutree(tree = as.dendrogram(my_hclust_gene), k = 4) # four clusters
+  my_gene_col[[i]] <- data.frame(cluster = my_gene_col[[i]])
+  
+  
+  # I’ll add some column annotations and create the heatmap.
+    # Annotations for:
+    # 1. Is the sample collected during the light or dark phase? 
+  my_sample_col <- data.frame(phase = rep(c("light", "dark", "light"), c(5,6,1)))
+  row.names(my_sample_col) <- colnames(zscore.rhy)
+  
+  # Manual color palette
+  my_colour = list(
+    phase = c(light = "#F2E205", dark = "#010440"),
+    cluster = viridis::cividis(100)[c(10,90,60,30)])
+  
+  # Color scale
+  my.breaks = seq(-3, max(zscore.rhy), by=0.06)
+  # my.breaks = seq(min(zscore.rhy), max(zscore.rhy), by=0.06)
+  
+  # Let's plot!
+  pheatmap(zscore.rhy, show_rownames = F, show_colnames = F,
+                           annotation_row = my_gene_col[[i]], 
+                           annotation_col = my_sample_col,
+                           # cutree_rows = 4,
+                           cutree_cols = 2,
+                           annotation_colors = my_colour,
+                           border_color=FALSE,
+                           cluster_cols = F,
+                           breaks = my.breaks,
+                           ## color scheme borrowed from: 
+                           color = inferno(length(my.breaks) - 1),
+                           # treeheight_row = 0, 
+                           # treeheight_col = 0,
+                           # remove the color scale or not
+                           main = paste0(names(rhy.genes)[i], 
+                                         " | n(genes) = ", 
+                                         length(rhy.genes[[i]])),
+                           ## annotation legend
+                           annotation_legend = T,
+                           ## Color scale
+                           legend = T)
+  
+  }
+
+
+```
+
+
+### 2.3 Which processes are enriched in the rhytmic genesets?
+
+#### 2.3.1 24h-rhythmic genes
+
+- that peak during the day (day-peaking clusters) and night (night-peaking clusters);
+- plot the enrichment results.
+ 
+From eye-balling the heatmap
+
+- day-peaking cluster: cluster-3, cluster-4
+- night-peaking cluster: cluster-1, cluster-2
+
+```{r enrichments_rhythmic_genes_24h}
+
+writeLines("runnning GO enrichment for day-peaking clusters")
+## day-peaking | cluster 3 & 4 ##
+rhy.24.daypeaking.cluster.3.4 <-
+  my_gene_col[[1]] %>%
+  rownames_to_column(var = "gene") %>%
+  filter(cluster %in% c(3,4)) %>%
+  pull(gene) %>%
+  # run enrichment analysis
+  go_enrichment(.,
+                function.dir = path_to_repo,
+                org = "cflo",
+                bg = expressed) #%>%  # enrichment against all expressed ophio_cflo genes
+
+writeLines("plotting the enriched GOs for day-peaking clusters")
+rhy.24.daypeaking.cluster.3.4 %>%
+  go_enrichment_plot(clean = "no",
+                     function.dir = path_to_repo,
+                     fdr = 5)
+# # view the results
+# rhy.24.daypeaking.cluster.3.4 %>% head() %>% view()
+
+
+writeLines("runnning GO enrichment for night-peaking clusters")
+## night-peaking | cluster 1 & 2 ##
+rhy.24.nightpeaking.cluster.1.2 <-
+  my_gene_col[[1]] %>%
+  rownames_to_column(var = "gene") %>%
+  filter(cluster %in% c(1,2)) %>%
+  pull(gene) %>%
+  # stacked.zplot_tc7()
+  go_enrichment(.,
+                function.dir = path_to_repo,
+                org = "cflo",
+                bg = expressed)
+writeLines("plotting the enriched GOs for night-peaking clusters")
+# plot the enriched GOs
+rhy.24.nightpeaking.cluster.1.2 %>%
+  go_enrichment_plot(clean = "no", 
+                     function.dir = path_to_repo,
+                     fdr = 5)
+# # view the results
+# rhy.24.nightpeaking.cluster.1.2 %>% head() %>% view()
+
+```
+
+#### 2.3.2 12h-rhythmic genes
+
+> We did not find any enriched GOs for 12h-rhythmic genes
+
+```{r}
+my_gene_col[[2]] %>%
+  rownames_to_column(var = "gene") %>%
+  pull(gene) %>% 
+  stacked.zplot_tc7() %>% 
+  multi.plot(rows = 3,cols = 1)
+```
+
+
+#### 2.3.3 08h-rhyhtmic genes
+
+Run GO enrichment for: 
+
+- all of them (What are these genes?) | result: 1-BP and 4-MF sig. enriched
+- Cluster 1 (one peak is around ZT16-18) | result: 1-BP and 3-MF sig. enriched
+- Cluster 3 (one peak is around ZT6) | result: 1-MF sig. enriched
+
+
+```{r enrichments_rhythmic_genes_08h}
+
+writeLines("runnning GO enrichment for all 08h-rhythmic genes")
+# all genes
+# rhy.8.all.genes <-
+  my_gene_col[[3]] %>%
+    rownames_to_column(var = "gene") %>%
+    # filter(cluster %in% c(2,3)) %>%
+    pull(gene) %>%
+    # run enrichment analysis
+    go_enrichment(.,
+                  function.dir = path_to_repo,
+                  org = "cflo",
+                  bg = expressed) %>%  # enrichment against all expressed ophio_cflo genes
+    go_enrichment_plot(clean = "no",
+                       function.dir = path_to_repo)
+
+writeLines("runnning GO enrichment for 08h-rhythmic genes in Cluster 01")
+# cluster 1
+# rhy.8.cluster.1 <-
+  my_gene_col[[3]] %>%
+    rownames_to_column(var = "gene") %>%
+    filter(cluster %in% c(1)) %>%
+    pull(gene) %>%
+    # run enrichment analysis
+    go_enrichment(.,
+                  function.dir = path_to_repo,
+                  org = "cflo",
+                  bg = expressed) %>%  # enrichment against all expressed ophio_cflo genes
+    go_enrichment_plot(clean = "no",
+                       function.dir = path_to_repo)
+
+writeLines("runnning GO enrichment for 08h-rhythmic genes in Cluster 03")
+# cluster 3
+# rhy.8.cluster.3 <-
+  my_gene_col[[3]] %>%
+  rownames_to_column(var = "gene") %>%
+  filter(cluster %in% c(3)) %>%
+  pull(gene) %>%
+  # run enrichment analysis
+  go_enrichment(.,
+                function.dir = path_to_repo,
+                org = "cflo",
+                bg = expressed) %>%  # enrichment against all expressed ophio_cflo genes
+  go_enrichment_plot(clean = "no",
+                   function.dir = path_to_repo)
+
+```
+

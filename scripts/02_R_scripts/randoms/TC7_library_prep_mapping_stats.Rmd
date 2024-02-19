@@ -1,0 +1,573 @@
+---
+title: "Library conc and mapping stats for TC7"
+author: Biplabendu Das
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: united
+    keep_md: no
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = F)
+knitr::opts_chunk$set(message = F)
+
+## For more inspiration on customizing the html output, refer to the following:
+# https://bookdown.org/yihui/rmarkdown/html-document.html#table-of-contents
+
+```
+
+
+# Housekeeping
+
+```{r libs}
+
+rm(list = ls())
+
+path_to_repo <- "/Users/biplabendudas/Documents/GitHub/Das_et_al_2022b"
+
+## load libraries
+pacman::p_load(tidyverse, ggplot2, lubridate, conflicted)
+## load functions
+# customized theme for publication quality figures
+source(paste0(path_to_repo,"/functions/theme_publication.R"))
+
+
+## set conflict preference
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflict_prefer("union", "dplyr")
+
+## summary function
+summarySE <- function(data=NULL, measurevar, groupvars=NULL, na.rm=FALSE,
+                      conf.interval=.95, .drop=TRUE) {
+  
+  # New version of length which can handle NA's: if na.rm==T, don't count them
+  length2 <- function (x, na.rm=FALSE) {
+    if (na.rm) sum(!is.na(x))
+    else       length(x)
+  }
+  
+  # This does the summary. For each group's data frame, return a vector with
+  # N, mean, and sd
+  datac <- plyr::ddply(data, groupvars, .drop=.drop,
+                       .fun = function(xx, col) {
+                         c(N    = length2(xx[[col]], na.rm=na.rm),
+                           mean = mean   (xx[[col]], na.rm=na.rm),
+                           sd   = sd     (xx[[col]], na.rm=na.rm)
+                         )
+                       },
+                       measurevar
+  )
+  
+  # Rename the "mean" column    
+  datac <- plyr::rename(datac, c("mean" = measurevar))
+  
+  datac$se <- datac$sd / sqrt(datac$N)  # Calculate standard error of the mean
+  
+  # Confidence interval multiplier for standard error
+  # Calculate t-statistic for confidence interval: 
+  # e.g., if conf.interval is .95, use .975 (above/below), and use df=N-1
+  ciMult <- qt(conf.interval/2 + .5, datac$N-1)
+  datac$ci <- datac$se * ciMult
+  
+  # detach("package:plyr", unload=TRUE)
+  return(datac)
+}
+
+```
+
+# Initialize parameters
+
+```{r global_params}
+my.colors <- c(ophio="#AD212F", beau="#5A829F", control="#233A41")
+
+```
+
+
+# Experimental Runs
+
+> Left incu: controls, Right incu: infected ants
+
+Run #1: Controls (sampled), Beau-inf (sampled)
+
+Run #2: Controls (not-sampled), Ophio-inf (sampled)
+
+
+# Plot relevant data
+
+### Step 1: Load data
+
+```{r load_data_1}
+dat <- read.csv(paste0(path_to_repo,
+                            "/results/supplementary_files/TC7_library_conc_mapping_stats.csv"),
+                     colClasses = "character",
+                     header = T, na.strings = c(" ","","NA"),
+                     stringsAsFactors = F)
+
+writeLines("original dataset; supplementary file")
+dat %>% as.tibble() %>% head()
+
+# prep before tidying
+ordered.levels <- dat %>% pull(sample)
+ordered.vars <- colnames(dat)[c(3,7:13)]
+treatment.names <- c("ophio","beau","controls")
+
+### Tidy the data
+tidy.dat <- 
+  dat %>%  
+  select(sample, conc_nM, total_reads:aligned_multiple_beau) %>% 
+  mutate(treatment = rep(treatment.names, each=12)) %>% 
+  
+  pivot_longer(cols = ordered.vars, names_to = "measure_var", values_to = "value") %>%
+  
+  mutate(measure_var = factor(measure_var, levels=ordered.vars)) %>% 
+  mutate(treatment = factor(treatment, levels=treatment.names)) %>% 
+  
+  mutate(sample = as.numeric(readr::parse_number(sample))) %>% 
+  mutate(value = as.numeric(value))
+
+writeLines("original dataset in tidy format")
+tidy.dat %>% head()  
+```
+
+### Step 2: Summarize data
+
+```{r data_summary}
+
+tidy.dat %>% 
+ summarySE(measurevar = "value", groupvars = c("treatment","measure_var")) %>% 
+  na.omit() %>% 
+  select(treatment, measure_var, value, se) 
+
+```
+
+
+### Step 3: Plot data
+
+> Plot ONE: Concentrations of cDNA libraries in nM (mean ± 95% CI)
+
+```{r plot_1}
+
+# Specify your measure_var to plot
+which.measure <- ordered.vars[[1]]
+
+# Plot
+p <- 
+  tidy.dat %>% 
+  filter(measure_var == which.measure) %>% # conc_nM
+  na.omit() %>% 
+  ggplot()
+  
+for (i in 1:2) {
+  
+  if (i == 1) {
+  
+  p1 <- p + 
+  ## mean (± 95% CI)
+  labs(x = "Treatment",
+       y = which.measure,
+       title = "") +
+  geom_jitter(aes(x=treatment, y=value, col=treatment), width=0.2, size=3, alpha=0.5) +
+  stat_summary(fun = mean, geom = "point",
+               aes(x=treatment, y=value, col=treatment), size=6) +
+  stat_summary(fun.data = mean_cl_boot,
+               aes(x=treatment, y=value, col=treatment), geom = "errorbar", width = 0.3) +
+  scale_y_continuous(limits = c(0,NA)) +
+  theme_Publication(base_size = 20) +
+  # manual color scale
+  scale_color_manual(values = as.character(my.colors)) 
+  }
+  
+  else {
+    
+    p2 <- p +
+    ## time-course plot
+    labs(x = "Time (ZT)",
+         y = ordered.vars[[1]],
+         title = "") +
+    geom_rect(aes(xmin = 11.8, xmax = 23.8, ymin = -Inf, ymax = Inf),
+              fill = "lightgrey", alpha = 0.01, color=NA) +
+    geom_line(aes(x=sample, y=value, col=treatment), size=1.5, alpha=0.7) +
+    geom_point(aes(x=sample, y=value, col=treatment), size=4, alpha=0.7) +
+    scale_x_continuous(breaks = c(2,12,24),
+                       limits = c(0,24)) +
+
+    scale_y_continuous(limits = c(0,NA)) +
+    theme_Publication(base_size = 20) +
+    theme(panel.grid.major.x = element_line(colour = "#808080", size=0.1),
+          panel.grid.major.y = element_line(colour = "#808080", size=0.3)) +
+      
+    # manual color scale
+    scale_color_manual(values = as.character(my.colors))
+
+  }
+}
+
+ggpubr::ggarrange(p1, p2 + ggpubr::rremove("ylab"), 
+                  labels = NULL,
+                  common.legend = TRUE, legend = "top",
+                  align = "hv",
+                  
+                  ncol = 2)
+```
+
+> Plot TWO: Total reads sequenced (mean ± 95% CI)
+
+```{r plot_2}
+
+# Specify your measure_var to plot
+which.measure <- ordered.vars[[2]]
+
+# Plot
+p <- 
+  tidy.dat %>% 
+  filter(measure_var == which.measure) %>% # total_reads
+  na.omit() %>% 
+  # show vlaues in million reads (x 10^6)
+  mutate(value = value/1e6) %>% 
+  ggplot()
+  
+for (i in 1:2) {
+  
+  if (i == 1) {
+  
+  p1 <- p + 
+  ## mean (± 95% CI)
+  labs(x = "Treatment",
+       y = paste0(which.measure, "\n(million reads)"),
+       title = "") +
+  geom_jitter(aes(x=treatment, y=value, col=treatment), width=0.2, size=3, alpha=0.5) +
+  stat_summary(fun = mean, geom = "point",
+               aes(x=treatment, y=value, col=treatment), size=6) +
+  stat_summary(fun.data = mean_cl_boot,
+               aes(x=treatment, y=value, col=treatment), geom = "errorbar", width = 0.3) +
+  scale_y_continuous(limits = c(0,NA)) +
+  theme_Publication(base_size = 20) +
+  # manual color scale
+  scale_color_manual(values = as.character(my.colors)) 
+  }
+  
+  else {
+    
+    p2 <- p +
+    ## time-course plot
+    labs(x = "Time (ZT)",
+         y = ordered.vars[[1]],
+         title = "") +
+    geom_rect(aes(xmin = 11.8, xmax = 23.8, ymin = -Inf, ymax = Inf),
+              fill = "lightgrey", alpha = 0.01, color=NA) +
+    geom_line(aes(x=sample, y=value, col=treatment), size=1.5, alpha=0.7) +
+    geom_point(aes(x=sample, y=value, col=treatment), size=4, alpha=0.7) +
+    scale_x_continuous(breaks = c(2,12,24),
+                       limits = c(0,24)) +
+
+    scale_y_continuous(limits = c(0,NA)) +
+    theme_Publication(base_size = 20) +
+    theme(panel.grid.major.x = element_line(colour = "#808080", size=0.1),
+          panel.grid.major.y = element_line(colour = "#808080", size=0.3)) +
+      
+    # manual color scale
+    scale_color_manual(values = as.character(my.colors))
+
+  }
+}
+
+ggpubr::ggarrange(p1, p2 + ggpubr::rremove("ylab"), 
+                  labels = NULL,
+                  common.legend = TRUE, legend = "top",
+                  align = "hv",
+                  
+                  ncol = 2)
+```
+
+> Plot THREE: Reads aligned once to Cflo genome (mean ± 95% CI)
+
+```{r plot_3}
+
+# Specify your measure_var to plot
+which.measure <- ordered.vars[[3]]
+
+# Plot
+p <- 
+  tidy.dat %>% 
+  filter(measure_var == which.measure) %>% # aligned_once_cflo
+  na.omit() %>% 
+  # show vlaues in million reads (x 10^6)
+  mutate(value = value/1e6) %>% 
+  ggplot()
+  
+for (i in 1:2) {
+  
+  if (i == 1) {
+  
+  p1 <- p + 
+  ## mean (± 95% CI)
+  labs(x = "Treatment",
+       y = paste0(which.measure, "\n(million reads)"),
+       title = "") +
+  geom_jitter(aes(x=treatment, y=value, col=treatment), width=0.2, size=3, alpha=0.5) +
+  stat_summary(fun = mean, geom = "point",
+               aes(x=treatment, y=value, col=treatment), size=6) +
+  stat_summary(fun.data = mean_cl_boot,
+               aes(x=treatment, y=value, col=treatment), geom = "errorbar", width = 0.3) +
+  scale_y_continuous(limits = c(0,NA)) +
+  theme_Publication(base_size = 20) +
+  # manual color scale
+  scale_color_manual(values = as.character(my.colors)) 
+  }
+  
+  else {
+    
+    p2 <- p +
+    ## time-course plot
+    labs(x = "Time (ZT)",
+         y = ordered.vars[[1]],
+         title = "") +
+    geom_rect(aes(xmin = 11.8, xmax = 23.8, ymin = -Inf, ymax = Inf),
+              fill = "lightgrey", alpha = 0.01, color=NA) +
+    geom_line(aes(x=sample, y=value, col=treatment), size=1.5, alpha=0.7) +
+    geom_point(aes(x=sample, y=value, col=treatment), size=4, alpha=0.7) +
+    scale_x_continuous(breaks = c(2,12,24),
+                       limits = c(0,24)) +
+
+    scale_y_continuous(limits = c(0,NA)) +
+    theme_Publication(base_size = 20) +
+    theme(panel.grid.major.x = element_line(colour = "#808080", size=0.1),
+          panel.grid.major.y = element_line(colour = "#808080", size=0.3)) +
+      
+    # manual color scale
+    scale_color_manual(values = as.character(my.colors))
+
+  }
+}
+
+ggpubr::ggarrange(p1, p2 + ggpubr::rremove("ylab"), 
+                  labels = NULL,
+                  common.legend = TRUE, legend = "top",
+                  align = "hv",
+                  
+                  ncol = 2)
+```
+
+> Plot FOUR: Reads aligned multiple times to Cflo genome (mean ± 95% CI)
+
+```{r plot_4}
+
+# Specify your measure_var to plot
+which.measure <- ordered.vars[[4]]
+
+# Plot
+p <- 
+  tidy.dat %>% 
+  filter(measure_var == which.measure) %>% # aligned_multiple_cflo
+  na.omit() %>% 
+  # show vlaues in million reads (x 10^6)
+  mutate(value = value/1e6) %>% 
+  ggplot()
+  
+for (i in 1:2) {
+  
+  if (i == 1) {
+  
+  p1 <- p + 
+  ## mean (± 95% CI)
+  labs(x = "Treatment",
+       y = paste0(which.measure, "\n(million reads)"),
+       title = "") +
+  geom_jitter(aes(x=treatment, y=value, col=treatment), width=0.2, size=3, alpha=0.5) +
+  stat_summary(fun = mean, geom = "point",
+               aes(x=treatment, y=value, col=treatment), size=6) +
+  stat_summary(fun.data = mean_cl_boot,
+               aes(x=treatment, y=value, col=treatment), geom = "errorbar", width = 0.3) +
+  scale_y_continuous(limits = c(0,NA)) +
+  theme_Publication(base_size = 20) +
+  # manual color scale
+  scale_color_manual(values = as.character(my.colors)) 
+  }
+  
+  else {
+    
+    p2 <- p +
+    ## time-course plot
+    labs(x = "Time (ZT)",
+         y = ordered.vars[[1]],
+         title = "") +
+    geom_rect(aes(xmin = 11.8, xmax = 23.8, ymin = -Inf, ymax = Inf),
+              fill = "lightgrey", alpha = 0.01, color=NA) +
+    geom_line(aes(x=sample, y=value, col=treatment), size=1.5, alpha=0.7) +
+    geom_point(aes(x=sample, y=value, col=treatment), size=4, alpha=0.7) +
+    scale_x_continuous(breaks = c(2,12,24),
+                       limits = c(0,24)) +
+
+    scale_y_continuous(limits = c(0,NA)) +
+    theme_Publication(base_size = 20) +
+    theme(panel.grid.major.x = element_line(colour = "#808080", size=0.1),
+          panel.grid.major.y = element_line(colour = "#808080", size=0.3)) +
+      
+    # manual color scale
+    scale_color_manual(values = as.character(my.colors))
+
+  }
+}
+
+ggpubr::ggarrange(p1, p2 + ggpubr::rremove("ylab"), 
+                  labels = NULL,
+                  common.legend = TRUE, legend = "top",
+                  align = "hv",
+                  
+                  ncol = 2)
+
+```
+
+
+> Plot FIVE: Reads aligned once to Ophio genome (mean ± 95% CI)
+
+[Samples: ophio-infected ants]
+
+```{r plot_5}
+
+# Specify your measure_var to plot
+which.measure <- ordered.vars[[5]]
+
+# Plot
+p <- 
+  tidy.dat %>% 
+  filter(measure_var == which.measure) %>% # aligned_once_ophio
+  na.omit() %>% 
+  # show vlaues in million reads (x 10^6)
+  mutate(value = value/1e6) %>% 
+  ggplot()
+  
+for (i in 1:2) {
+  
+  if (i == 1) {
+  
+  p1 <- p + 
+  ## mean (± 95% CI)
+  labs(x = "Treatment",
+       y = paste0(which.measure, "\n(million reads)"),
+       title = "") +
+  geom_jitter(aes(x=treatment, y=value, col=treatment), width=0.2, size=3, alpha=0.5) +
+  stat_summary(fun = mean, geom = "point",
+               aes(x=treatment, y=value, col=treatment), size=6) +
+  stat_summary(fun.data = mean_cl_boot,
+               aes(x=treatment, y=value, col=treatment), geom = "errorbar", width = 0.3) +
+  scale_y_continuous(limits = c(0,NA)) +
+  theme_Publication(base_size = 20) +
+  # manual color scale
+  scale_color_manual(values = my.colors[1]) 
+  }
+  
+  else {
+    
+    p2 <- p +
+    ## time-course plot
+    labs(x = "Time (ZT)",
+         y = ordered.vars[[1]],
+         title = "") +
+    geom_rect(aes(xmin = 11.8, xmax = 23.8, ymin = -Inf, ymax = Inf),
+              fill = "lightgrey", alpha = 0.01, color=NA) +
+    geom_line(aes(x=sample, y=value, col=treatment), size=1.5, alpha=0.7) +
+    geom_point(aes(x=sample, y=value, col=treatment), size=4, alpha=0.7) +
+    scale_x_continuous(breaks = c(2,12,24),
+                       limits = c(0,24)) +
+
+    scale_y_continuous(limits = c(0,NA)) +
+    theme_Publication(base_size = 20) +
+    theme(panel.grid.major.x = element_line(colour = "#808080", size=0.1),
+          panel.grid.major.y = element_line(colour = "#808080", size=0.3)) +
+      
+    # manual color scale
+    scale_color_manual(values = my.colors[1])
+
+  }
+}
+
+ggpubr::ggarrange(p1, p2 + ggpubr::rremove("ylab"), 
+                  labels = NULL,
+                  common.legend = TRUE, legend = "top",
+                  align = "hv",
+                  ncol = 2)
+
+```
+
+
+> Plot SIX: Reads aligned once to Beau genome (mean ± 95% CI)
+
+[Samples: beau-infected ants]
+
+```{r plot_6}
+
+# Specify your measure_var to plot
+which.measure <- ordered.vars[[7]]
+
+# Plot
+p <- 
+  tidy.dat %>% 
+  filter(measure_var == which.measure) %>% # aligned_once_beau
+  na.omit() %>% 
+  # show vlaues in million reads (x 10^6)
+  mutate(value = value/1e6) %>% 
+  ggplot()
+  
+for (i in 1:2) {
+  
+  if (i == 1) {
+  
+  p1 <- p + 
+  ## mean (± 95% CI)
+  labs(x = "Treatment",
+       y = paste0(which.measure, "\n(million reads)"),
+       title = "") +
+  geom_jitter(aes(x=treatment, y=value, col=treatment), width=0.2, size=3, alpha=0.5) +
+  stat_summary(fun = mean, geom = "point",
+               aes(x=treatment, y=value, col=treatment), size=6) +
+  stat_summary(fun.data = mean_cl_boot,
+               aes(x=treatment, y=value, col=treatment), geom = "errorbar", width = 0.3) +
+  scale_y_continuous(limits = c(0,NA)) +
+  theme_Publication(base_size = 20) +
+  # manual color scale
+  scale_color_manual(values = my.colors[2]) 
+  }
+  
+  else {
+    
+    p2 <- p +
+    ## time-course plot
+    labs(x = "Time (ZT)",
+         y = ordered.vars[[1]],
+         title = "") +
+    geom_rect(aes(xmin = 11.8, xmax = 23.8, ymin = -Inf, ymax = Inf),
+              fill = "lightgrey", alpha = 0.01, color=NA) +
+    geom_line(aes(x=sample, y=value, col=treatment), size=1.5, alpha=0.7) +
+    geom_point(aes(x=sample, y=value, col=treatment), size=4, alpha=0.7) +
+    scale_x_continuous(breaks = c(2,12,24),
+                       limits = c(0,24)) +
+
+    scale_y_continuous(limits = c(0,NA)) +
+    theme_Publication(base_size = 20) +
+    theme(panel.grid.major.x = element_line(colour = "#808080", size=0.1),
+          panel.grid.major.y = element_line(colour = "#808080", size=0.3)) +
+      
+    # manual color scale
+    scale_color_manual(values = my.colors[2])
+
+  }
+}
+
+ggpubr::ggarrange(p1, p2 + ggpubr::rremove("ylab"), 
+                  labels = NULL,
+                  common.legend = TRUE, legend = "top",
+                  align = "hv",
+                  ncol = 2)
+```
+
+
