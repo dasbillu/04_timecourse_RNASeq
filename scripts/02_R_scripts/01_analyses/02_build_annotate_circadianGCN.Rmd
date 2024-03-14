@@ -190,7 +190,10 @@ dat <-
   select(gene_name, everything()) %>%
   collect()
 
-writeLines("What is the dimensions of the original dataset? [Rows = #genes, Cols = #samples]")
+writeLines(
+"What is the dimensions of the original dataset? 
+[Rows = #genes, Cols = #samples]"
+)
 dim(dat[-1])
 
 ```
@@ -203,9 +206,30 @@ However, not all of these genes are expressed in the ant head, and some are expr
 ```{r clean_data}
 # Which genes are expressed throughout the day in forager heads?
   # count the number of time points that has ≥ 1 FPKM
-  n.expressed <- apply(dat[-1], 1, function(x) sum(x >= 1))
   # subset the data and only keep the filtered genes
-  dat <- dat[which(n.expressed >=6),]
+
+# arguments
+min_expression = 1
+min_timepoints = 6
+
+dat <- dat |> 
+  ## to do ----
+  ## convert into function
+  mutate(
+    n_samples = rowSums(
+      across(
+        !gene_name,
+        ~ . >= min_expression
+      ),
+      na.rm = TRUE
+    )
+  ) |> 
+  filter(
+    n_samples >= min_timepoints
+  ) |> 
+  select(
+    - n_samples
+  )
 
 writeLines("Dimensions of the data post-filtering step [Rows = #genes, Cols = #samples]")
 dim(dat)
@@ -244,12 +268,46 @@ rownames(datExpr) = names(dat)[-c(1)]
 nGenes = ncol(datExpr)
 nSamples = nrow(datExpr)
 
-# visualize the log-transformed data
-x = reshape2::melt(as.matrix(t(datExpr)))
-colnames(x) = c('gene_id', 'sample', 'value')
-
 writeLines("Visualizing the log-transformed data")
-ggplot(x, aes(x=value, color=sample)) + geom_density() + theme_Publication()
+
+datExpr |> 
+  rownames_to_column(
+    "sample"
+  ) |> 
+  as_tibble() |> 
+  tidyr::pivot_longer(
+    cols = !sample,
+    names_to = "gene_id",
+    values_to = "log2_fpkm"
+  ) |> 
+  mutate(
+    sample = stringr::str_remove(sample, "ZT")
+  ) |> 
+  ggplot(
+    aes(
+      x = log2_fpkm, 
+      # color = sample,
+      fill = sample
+    )
+  ) + 
+  geom_density(
+    position = "stack"
+  ) + 
+  theme_Publication(25) +
+  scale_fill_manual(
+    values = viridis::viridis(nSamples)
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.justification = "right"
+  ) +
+  guides(
+    fill = guide_legend(
+      nrow = 3,
+      byrow=TRUE
+    )
+  )
+
 
 ```
 
@@ -261,8 +319,14 @@ ggplot(x, aes(x=value, color=sample)) + geom_density() + theme_Publication()
 # save(sim_matrix, 
 #      file = paste0(path_to_repo, "/results/wgcna_files/ref",
 #                    which.sample,"sim_matrix_", sample.name[1], "_TC9.RData")) # might be useful to save the sim_matrix and
-load(paste0(path_to_repo, "/results/wgcna_files/ref",
-                   which.sample,"sim_matrix_", sample.name[1], "_TC9.RData")) # load it up
+load(paste0(
+  path_to_repo, 
+  "/results/wgcna_files/ref",
+  which.sample,
+  "sim_matrix_", 
+  sample.name[1], 
+  "_TC9.RData"
+)) # load it up
 
 ## Let's display a chunk of the matrix (code from Hughitt 2016; github)
 heatmap_indices <- sample(nrow(sim_matrix), 200)
@@ -307,7 +371,7 @@ plot(sft$fitIndices[,1], sft$fitIndices[,5],
      xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
      main = paste("Mean connectivity"))
 text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
-
+par(mfrow = c(1,1));
 ```
 
 > NOTE: The scale-free topology fit index reaches ~0.70 at a soft-thresholding-power=12.
@@ -325,9 +389,16 @@ soft.power = 12
 #                                         )
 # save(adj_matrix, 
 #      file = paste0(path_to_repo, "/results/wgcna_files/ref",
-#                    which.sample,"adj_matrix_", sample.name[1], "_TC9.RData")) # might be useful to save the sim_matrix and
+#                    which.sample,"adj_matrix_", sample.name[1], "_TC9.RData")) 
+
+## Delete similarity matrix to free up memory
+rm(sim_matrix)
+gc()
+
+# might be useful to save the sim_matrix and
 load(paste0(path_to_repo, "/results/wgcna_files/ref",
-                   which.sample,"adj_matrix_", sample.name[1], "_TC9.RData")) # load it up
+                   which.sample,"adj_matrix_", sample.name[1], "_TC9.RData")) 
+# load it up
 
 
 # Convert adj_matrix to matrix
@@ -344,12 +415,8 @@ gplots::heatmap.2(t(adj_matrix[heatmap_indices, heatmap_indices]),
                   labRow=NA, labCol=NA,
                   trace='none', dendrogram='row',
                   xlab='Gene', ylab='Gene',
-                  main='Adjacency matrix',
+                  main='Adjacency matrix\n(post power transformation)',
                   density.info='none', revC=TRUE)
-
-## Delete similarity matrix to free up memory
-rm(sim_matrix)
-gc()
 
 ```
 
@@ -398,7 +465,8 @@ dynamicMods= cutreeDynamic(dendro = geneTree,
                            distM = dissTOM,
                            method = "hybrid",
                            verbose = 4,
-                           deepSplit = 3, # see WGCNA for more info on tuning parameters
+                           deepSplit = 3, 
+                           # see WGCNA for more info on tuning parameters
                            pamRespectsDendro = FALSE,
                            minClusterSize = minModuleSize);
 
@@ -484,8 +552,15 @@ adj_matrix_ME <- WGCNA::adjacency.fromSimilarity(sim_matrix_ME,
 
 ## CHANGE THE NAMES OF THE MODULES;
 module_ids <- data.frame(
-  old_labels = rownames(adj_matrix_ME) %>% str_split("ME", 2) %>% sapply("[", 2) %>% as.character(),
-  new_labels = paste0("C", 1:nrow(adj_matrix_ME)))
+  old_labels = rownames(adj_matrix_ME) %>% 
+    str_split("ME", 2) %>% 
+    sapply("[", 2) %>% 
+    as.character(),
+  new_labels = paste0(
+    "C", 
+    1:nrow(adj_matrix_ME)
+  )
+)
 # and coerce into matrix
 adj_matrix_ME <- matrix(adj_matrix_ME, nrow=nrow(adj_matrix_ME))
 rownames(adj_matrix_ME) <- module_ids$new_labels
@@ -560,7 +635,7 @@ E(network)$color <- "black"
 writeLines("Visualizing a simplified representation of the circadian GCN, with and without labels")
 
 # trash <- dev.off()
-# par(mfrow = c(1,1))
+par(mfrow = c(1,1))
     
 # png(paste0(path_to_repo, "/results/figures/", sample.name[1], "/", script.name,"/", sample.name[1],"_GCN_2.png"),
 #     width = 20, height = 30, units = "cm", res = 600)
@@ -756,11 +831,11 @@ writeLines("Visualizing the significant overlaps between your lists of interesti
 
 ## PLOT MODULE EXPRESSION
 
+### Daily tempo
+
 ```{r plot_modules, fig.height=10, fig.width=5}
 which.modules <- c("C1","C2",
-                   "C4", "C3",
-                   "C11","C10",
-                   "C9")
+                   "C10","C11")
 module.plots <- list()
 for (i in 1: length(which.modules)) {
   
@@ -773,6 +848,9 @@ for (i in 1: length(which.modules)) {
 
 }
 
+module.plots <- module.plots |> 
+  setNames(which.modules)
+
 # png(paste0(path_to_repo, "/results/figures/", sample.name[1],"module_exp.png"),
 #     width = 25, height = 40, units = "cm", res = 400)
 # module.plots %>%
@@ -780,6 +858,37 @@ for (i in 1: length(which.modules)) {
 # trash <- dev.off()
 ```
 
+### Amplitude
+
+```{r plot_modules_2, fig.height=10, fig.width=10}
+paste0("C", 1:11) |>
+  purrr::map(
+    function(m) {
+      module_genes[[m]] |> 
+        amplitude.plot(
+          stats = FALSE
+        ) +
+        labs(
+          title = m
+        ) +
+        scale_y_continuous(
+          n.breaks = 3
+        ) +
+        theme(
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank()
+        )
+    }
+  ) |> 
+  multi.plot(rows = 3, cols = 4)
+```
+
+
+### Avg daily exp
+
+```{r plot_modules_3, fig.height=10, fig.width=10}
+
+```
 
 
 ***

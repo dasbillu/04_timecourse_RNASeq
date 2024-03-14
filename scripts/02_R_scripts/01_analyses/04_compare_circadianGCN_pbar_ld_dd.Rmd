@@ -1,5 +1,5 @@
 ---
-title: "Compare GCNs: Cflo DD v. LD (ref)"
+title: "Compare GCNs: Pbar DD v. LD (ref)"
 author: Biplabendu Das
 date: '`r format(Sys.time(), "%d %B, %Y")`'
 output:
